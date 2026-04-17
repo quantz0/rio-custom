@@ -1189,36 +1189,22 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             return false;
         }
 
-        let scale = sugarloaf.ctx.scale();
         let visible_nodes: FxHashMap<NodeId, bool> = self
             .inner
             .keys()
             .map(|&node_id| (node_id, self.is_node_visible(node_id)))
             .collect();
-        let is_multi_panel = visible_nodes
-            .values()
-            .filter(|&&is_visible| is_visible)
-            .count()
-            > 1;
 
         for (node_id, item) in self.inner.iter_mut() {
             let is_visible = visible_nodes.get(node_id).copied().unwrap_or(true);
-            sugarloaf.set_visibility(item.val.rich_text_id, is_visible);
-
             if !is_visible {
-                sugarloaf.set_bounds(item.val.rich_text_id, None);
                 continue;
             }
 
-            let [abs_x, abs_y, width, height] = item.layout_rect;
-
-            let x = (abs_x + self.scaled_margin.left) / scale;
-            let y = (abs_y + self.scaled_margin.top) / scale;
-
             // Clear margin since Taffy layout already accounts for spacing
             item.val.dimension.margin = Margin::all(0.0);
-            item.val.dimension.update_width(width);
-            item.val.dimension.update_height(height);
+            item.val.dimension.update_width(item.layout_rect[2]);
+            item.val.dimension.update_height(item.layout_rect[3]);
 
             // Update terminal size
             let mut terminal = item.val.terminal.lock();
@@ -1228,23 +1214,61 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             let winsize =
                 crate::renderer::utils::terminal_dimensions(&item.val.dimension);
             let _ = item.val.messenger.send_resize(winsize);
+        }
 
-            // Update position via sugarloaf (handles scaling)
-            sugarloaf.set_position(item.val.rich_text_id, x, y);
+        self.sync_rich_text_layout_state(sugarloaf);
+        true
+    }
 
-            // Set clipping bounds for multi-panel text overflow prevention
+    #[inline]
+    fn rich_text_visibility_by_layout(&self) -> FxHashMap<usize, bool> {
+        self.inner
+            .iter()
+            .map(|(&node_id, item)| {
+                (item.val.rich_text_id, self.is_node_visible(node_id))
+            })
+            .collect()
+    }
+
+    #[inline]
+    pub fn sync_rich_text_layout_state(&self, sugarloaf: &mut Sugarloaf) {
+        let scale = sugarloaf.ctx.scale();
+        let visibility_by_text_id = self.rich_text_visibility_by_layout();
+        let is_multi_panel = visibility_by_text_id
+            .values()
+            .filter(|&&visible| visible)
+            .count()
+            > 1;
+
+        for item in self.inner.values() {
+            let rich_text_id = item.val.rich_text_id;
+            let is_visible = visibility_by_text_id
+                .get(&rich_text_id)
+                .copied()
+                .unwrap_or(true);
+
+            sugarloaf.set_visibility(rich_text_id, is_visible);
+
+            if !is_visible {
+                sugarloaf.set_bounds(rich_text_id, None);
+                continue;
+            }
+
+            let [abs_x, abs_y, width, height] = item.layout_rect;
+            let x = (abs_x + self.scaled_margin.left) / scale;
+            let y = (abs_y + self.scaled_margin.top) / scale;
+
+            sugarloaf.set_position(rich_text_id, x, y);
+
             if is_multi_panel {
                 let bounds_x = abs_x + self.scaled_margin.left;
                 let bounds_y = abs_y + self.scaled_margin.top;
-                sugarloaf.set_bounds(
-                    item.val.rich_text_id,
-                    Some([bounds_x, bounds_y, width, height]),
-                );
+                sugarloaf
+                    .set_bounds(rich_text_id, Some([bounds_x, bounds_y, width, height]));
             } else {
-                sugarloaf.set_bounds(item.val.rich_text_id, None);
+                sugarloaf.set_bounds(rich_text_id, None);
             }
         }
-        true
     }
 
     #[inline]
@@ -1935,9 +1959,12 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
     }
 
     #[inline]
-    pub fn set_all_rich_text_visibility(&self, sugarloaf: &mut Sugarloaf, hidden: bool) {
+    pub fn set_all_rich_text_visibility(&self, sugarloaf: &mut Sugarloaf, visible: bool) {
         for item in self.inner.values() {
-            sugarloaf.set_visibility(item.val.rich_text_id, hidden);
+            sugarloaf.set_visibility(item.val.rich_text_id, visible);
+            if !visible {
+                sugarloaf.set_bounds(item.val.rich_text_id, None);
+            }
         }
     }
 
