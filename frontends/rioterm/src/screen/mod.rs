@@ -55,6 +55,29 @@ use std::error::Error;
 use std::ffi::OsStr;
 use touch::TouchPurpose;
 
+fn mark_all_contexts_for_full_redraw<T>(context_manager: &mut ContextManager<T>)
+where
+    T: rio_backend::event::EventListener + Clone + std::marker::Send + 'static,
+{
+    for context_grid in context_manager.contexts_mut() {
+        for context_item in context_grid.contexts_mut().values_mut() {
+            context_item
+                .context_mut()
+                .renderable_content
+                .pending_update
+                .set_terminal_damage(rio_backend::event::TerminalDamage::Full);
+        }
+    }
+}
+
+#[inline]
+fn physical_cell_height(dimension: &ContextDimension) -> f32 {
+    // Sugarloaf already returns text cell height in physical pixels with the
+    // configured line-height modifier applied, so callers must not multiply by
+    // line_height again.
+    dimension.dimension.height
+}
+
 /// Maximum number of lines for the blocking search while still typing the search regex.
 const MAX_SEARCH_WHILE_TYPING: Option<usize> = Some(1000);
 
@@ -330,7 +353,6 @@ impl Screen<'_> {
         let current_grid = self.context_manager.current_grid();
         let (context, margin) = current_grid.current_context_with_computed_dimension();
         let context_dimension = context.dimension;
-        let style = self.sugarloaf.style();
         calculate_mouse_position(
             &self.mouse,
             display_offset,
@@ -339,7 +361,7 @@ impl Screen<'_> {
             margin.top,
             (
                 context_dimension.dimension.width,
-                context_dimension.dimension.height * style.line_height,
+                physical_cell_height(&context_dimension),
             ),
         )
     }
@@ -486,6 +508,7 @@ impl Screen<'_> {
 
         self.context_manager
             .resize_all_grids(width, height, &mut self.sugarloaf);
+        mark_all_contexts_for_full_redraw(&mut self.context_manager);
 
         self
     }
@@ -508,6 +531,7 @@ impl Screen<'_> {
 
         self.context_manager
             .resize_all_grids(width, height, &mut self.sugarloaf);
+        mark_all_contexts_for_full_redraw(&mut self.context_manager);
 
         self
     }
@@ -2218,8 +2242,7 @@ impl Screen<'_> {
         let layout = context.dimension;
         // All values in physical pixels — margin is pre-scaled, cell
         // dimensions are in physical pixels, position.y is physical.
-        let cell_height =
-            (layout.dimension.height * self.sugarloaf.style().line_height) as f64;
+        let cell_height = physical_cell_height(&layout) as f64;
         let text_area_top = margin.top as f64;
         let text_area_bottom = text_area_top + layout.lines as f64 * cell_height;
         let window_height = self.sugarloaf.window_size().height as f64;
@@ -2264,7 +2287,7 @@ impl Screen<'_> {
         let layout = context.dimension;
         // Margin is already pre-scaled (physical pixels), same as x/y.
         let cell_width = layout.dimension.width;
-        let cell_height = layout.dimension.height * self.sugarloaf.style().line_height;
+        let cell_height = physical_cell_height(&layout);
         x > margin.left as usize
             && x <= (margin.left + layout.columns as f32 * cell_width) as usize
             && y > margin.top as usize
@@ -3442,8 +3465,7 @@ impl Screen<'_> {
             if let Some(current_item) = current_grid.current_item() {
                 let layout = current_item.val.dimension;
                 let cell_width = layout.dimension.width;
-                let line_height = self.sugarloaf.style().line_height;
-                let cell_height = layout.dimension.height * line_height;
+                let cell_height = physical_cell_height(&layout);
                 let scale_factor = self.sugarloaf.scale_factor();
 
                 let panel_rect = current_item.layout_rect;
@@ -3532,8 +3554,7 @@ impl Screen<'_> {
 
         // Calculate pixel position of cursor
         let cell_width = layout.dimension.width;
-        let line_height = self.sugarloaf.style().line_height;
-        let cell_height = layout.dimension.height * line_height;
+        let cell_height = physical_cell_height(&layout);
 
         // Validate dimensions before calculation
         if cell_width <= 0.0 || cell_height <= 0.0 {
@@ -3964,6 +3985,84 @@ fn post_process_hyperlink_uri(uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rio_backend::event::{TerminalDamage, VoidListener};
+    use rio_backend::sugarloaf::layout::TextDimensions;
+    use rio_window::window::WindowId;
+
+    #[test]
+    fn mark_all_contexts_for_full_redraw_marks_every_context_dirty() {
+        let window_id = WindowId::from(0);
+        let mut context_manager = crate::context::ContextManager::start_with_capacity(
+            3,
+            VoidListener {},
+            window_id,
+        )
+        .unwrap();
+
+        context_manager.add_context(false, 0);
+        assert_eq!(context_manager.len(), 2);
+
+        mark_all_contexts_for_full_redraw(&mut context_manager);
+
+        for context_grid in context_manager.contexts_mut() {
+            for context_item in context_grid.contexts_mut().values_mut() {
+                let pending =
+                    &mut context_item.context_mut().renderable_content.pending_update;
+                assert!(pending.is_dirty());
+                assert_eq!(pending.take_terminal_damage(), Some(TerminalDamage::Full));
+            }
+        }
+    }
+
+    #[test]
+    fn mark_all_contexts_for_full_redraw_upgrades_partial_damage_to_full() {
+        let window_id = WindowId::from(0);
+        let mut context_manager = crate::context::ContextManager::start_with_capacity(
+            1,
+            VoidListener {},
+            window_id,
+        )
+        .unwrap();
+
+        context_manager
+            .current_mut()
+            .renderable_content
+            .pending_update
+            .set_terminal_damage(TerminalDamage::Partial(
+                [rio_backend::crosswords::LineDamage::new(0, true)]
+                    .into_iter()
+                    .collect(),
+            ));
+
+        mark_all_contexts_for_full_redraw(&mut context_manager);
+
+        let pending = &mut context_manager
+            .current_mut()
+            .renderable_content
+            .pending_update;
+        assert!(pending.is_dirty());
+        assert_eq!(pending.take_terminal_damage(), Some(TerminalDamage::Full));
+    }
+
+    #[test]
+    fn physical_cell_height_does_not_apply_line_height_twice() {
+        let dimension = ContextDimension {
+            lines: 5,
+            line_height: 2.0,
+            dimension: TextDimensions {
+                width: 8.0,
+                height: 24.0,
+                scale: 1.0,
+            },
+            ..ContextDimension::default()
+        };
+
+        assert_eq!(physical_cell_height(&dimension), 24.0);
+        assert_eq!(
+            dimension.lines as f32 * physical_cell_height(&dimension),
+            120.0
+        );
+    }
 
     #[test]
     fn test_post_process_hyperlink_uri() {

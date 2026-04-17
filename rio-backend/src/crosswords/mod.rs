@@ -1326,8 +1326,12 @@ impl<U: EventListener> Crosswords<U> {
 
     #[inline]
     pub fn visible_rows(&self) -> Vec<Row<Square>> {
-        let mut start = self.scroll_region.start.0;
-        let mut end = self.scroll_region.end.0;
+        // The DEC scrolling region constrains terminal scroll operations, but it
+        // must not constrain what the renderer sees. Rendering always needs the
+        // full viewport, otherwise rows outside the active scroll region can
+        // still exist in the grid but never reach the frontend.
+        let mut start = 0;
+        let mut end = self.grid.screen_lines() as i32;
         let mut visible_rows = Vec::with_capacity(self.grid.screen_lines());
 
         let scroll = self.display_offset() as i32;
@@ -1348,8 +1352,8 @@ impl<U: EventListener> Crosswords<U> {
         &self,
         damage: &TerminalDamage,
     ) -> (Vec<Row<Square>>, Vec<usize>) {
-        let mut start = self.scroll_region.start.0;
-        let mut end = self.scroll_region.end.0;
+        let mut start = 0;
+        let mut end = self.grid.screen_lines() as i32;
         let mut visible_rows = Vec::with_capacity(self.grid.screen_lines());
         let mut damaged_lines = Vec::new();
 
@@ -5659,6 +5663,38 @@ mod tests {
             0,
             10_000,
         )
+    }
+
+    #[test]
+    fn visible_rows_returns_full_viewport_by_default() {
+        let mut cw = new_term(1, 5);
+        for row in 0..5 {
+            cw.grid[Line(row)][Column(0)].set_c(char::from(b'a' + row as u8));
+        }
+
+        let visible_rows = cw.visible_rows();
+
+        assert_eq!(visible_rows.len(), 5);
+        assert_eq!(visible_rows[0][Column(0)].c(), 'a');
+        assert_eq!(visible_rows[4][Column(0)].c(), 'e');
+    }
+
+    #[test]
+    fn visible_rows_ignore_scrolling_region_for_rendering() {
+        let mut cw = new_term(1, 5);
+        for row in 0..5 {
+            cw.grid[Line(row)][Column(0)].set_c(char::from(b'a' + row as u8));
+        }
+
+        // Keep the last screen row outside the active scroll region. The
+        // renderer must still receive it, otherwise the bottom line becomes
+        // unreachable even though it exists in the grid.
+        cw.set_scrolling_region(1, Some(4));
+        let visible_rows = cw.visible_rows();
+
+        assert_eq!(visible_rows.len(), 5);
+        assert_eq!(visible_rows[0][Column(0)].c(), 'a');
+        assert_eq!(visible_rows[4][Column(0)].c(), 'e');
     }
 
     #[test]

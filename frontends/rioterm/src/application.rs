@@ -1655,6 +1655,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 }
 
                 route.window.screen.resize(new_size);
+                route.request_redraw();
             }
 
             WindowEvent::ScaleFactorChanged {
@@ -1667,6 +1668,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     .screen
                     .set_scale(scale, route.window.winit_window.inner_size());
                 route.window.update_vblank_interval();
+                route.request_redraw();
             }
 
             WindowEvent::RedrawRequested => {

@@ -560,9 +560,23 @@ impl Content {
         &self,
         layout: &TextLayout,
     ) -> crate::layout::TextDimensions {
-        if let Some(font_library_data) = self.fonts.inner.try_read() {
+        let scale = layout.dimensions.scale;
+        let scaled_font_size = layout.font_size * scale;
+        let fallback_width = scaled_font_size.max(1.0);
+        let fallback_height = (scaled_font_size * layout.line_height).max(1.0);
+
+        if let Some(mut font_library_data) = self.fonts.inner.try_write() {
             let font_id = 0; // FONT_ID_REGULAR
-            let font_size = layout.font_size;
+
+            // Match the renderer's physical line-height calculation path so the
+            // computed viewport row count never exceeds what can actually be
+            // drawn after resize/fullscreen transitions.
+            let line_height_physical = font_library_data
+                .get_font_metrics(&font_id, scaled_font_size)
+                .map(|(ascent, descent, leading)| {
+                    ((ascent + descent + leading) * layout.line_height).max(1.0)
+                })
+                .unwrap_or(fallback_height);
 
             // Get font data to create swash FontRef
             if let Some((font_data, offset, _key)) = font_library_data.get_data(&font_id)
@@ -586,56 +600,41 @@ impl Content {
                             );
                         let advance = glyph_metrics.advance_width(glyph_id);
 
-                        // Scale to font size
+                        // Scale directly into physical pixels to match
+                        // renderer-space coordinates.
                         let units_per_em = font_metrics.units_per_em as f32;
-                        let scale_factor = font_size / units_per_em;
+                        let scale_factor = scaled_font_size / units_per_em;
 
                         if advance > 0.0 {
                             advance * scale_factor
                         } else {
                             // Fallback: approximate monospace character width
-                            font_size
+                            fallback_width
                         }
                     };
 
-                    // Calculate line height using scaled metrics
-                    let units_per_em = font_metrics.units_per_em as f32;
-                    let scale_factor = font_size / units_per_em;
-                    let ascent = font_metrics.ascent * scale_factor;
-                    let descent = font_metrics.descent.abs() * scale_factor;
-                    let leading = font_metrics.leading * scale_factor;
-                    let line_height = (ascent + descent + leading) * layout.line_height;
-
-                    // Scale to physical pixels to match what the brush returns.
-                    // physical scale — the renderer uses that ceiled value.
-                    let char_width_physical = char_width * layout.dimensions.scale;
-                    let line_height_physical =
-                        (line_height * layout.dimensions.scale).ceil();
-
                     // Return dimensions in physical pixels (matching brush behavior)
                     let result = crate::layout::TextDimensions {
-                        width: char_width_physical,
+                        width: char_width.max(1.0),
                         height: line_height_physical,
-                        scale: layout.dimensions.scale,
+                        scale,
                     };
-
-                    // println!("  -> Returning dimensions (physical): width={}, height={}, scale={}",
-                    //     result.width, result.height, result.scale);
 
                     return result;
                 }
             }
+
+            return crate::layout::TextDimensions {
+                width: fallback_width,
+                height: line_height_physical,
+                scale,
+            };
         }
 
-        // Fallback to reasonable defaults if font metrics unavailable
-        // Return in physical pixels to match brush behavior
-        let fallback_width = layout.font_size;
-        let fallback_height = layout.font_size * layout.line_height;
-
         crate::layout::TextDimensions {
-            width: fallback_width * layout.dimensions.scale,
-            height: fallback_height * layout.dimensions.scale,
-            scale: layout.dimensions.scale,
+            width: fallback_width,
+            height: fallback_height,
+            scale,
         }
     }
 
@@ -1465,6 +1464,7 @@ impl ShapingCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::font::FontLibrary;
     use crate::font_introspector::shape::cluster::{Glyph, OwnedGlyphCluster};
     use crate::font_introspector::text::cluster::SourceRange;
 
@@ -1510,6 +1510,41 @@ mod tests {
             advance,
             cache_key,
         }
+    }
+
+    #[test]
+    fn test_character_cell_height_matches_renderer_metrics_path() {
+        let font_library = FontLibrary::default();
+        let content = Content::new(&font_library);
+        let layout = TextLayout {
+            line_height: 1.25,
+            font_size: 18.0,
+            original_font_size: 18.0,
+            dimensions: crate::layout::TextDimensions {
+                width: 0.0,
+                height: 0.0,
+                scale: 1.5,
+            },
+        };
+
+        let dimensions = content.calculate_character_cell_dimensions(&layout);
+        let scaled_font_size = layout.font_size * layout.dimensions.scale;
+        let expected_height = font_library
+            .inner
+            .write()
+            .get_font_metrics(&0, scaled_font_size)
+            .map(|(ascent, descent, leading)| {
+                (ascent + descent + leading) * layout.line_height
+            })
+            .unwrap();
+
+        assert!(
+            (dimensions.height - expected_height).abs() < f32::EPSILON,
+            "cell height must match renderer metrics path: got {}, expected {}",
+            dimensions.height,
+            expected_height
+        );
+        assert!(dimensions.width > 0.0);
     }
 
     #[test]

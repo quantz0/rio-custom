@@ -220,6 +220,20 @@ pub fn create_mock_context<
 
 impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
     #[inline]
+    fn invalidate_current_grid_for_full_redraw(&mut self) {
+        for context_item in self.contexts[self.current_index]
+            .contexts_mut()
+            .values_mut()
+        {
+            context_item
+                .context_mut()
+                .renderable_content
+                .pending_update
+                .set_terminal_damage(rio_backend::event::TerminalDamage::Full);
+        }
+    }
+
+    #[inline]
     fn create_context(
         cursor_state: (&Cursor, bool),
         event_proxy: T,
@@ -761,6 +775,11 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         for context_grid in self.contexts.iter_mut() {
             context_grid.resize(width, height, sugarloaf);
         }
+
+        // `ContextGrid::resize` reapplies panel-local visibility for every grid.
+        // Reassert the tab-level visibility contract afterward so inactive tabs
+        // stay hidden across window resize/fullscreen transitions.
+        self.keep_only_active_context_visible(sugarloaf);
     }
 
     pub fn update_titles(&mut self) {
@@ -854,6 +873,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         if context_id < self.contexts.len() {
             self.current_index = context_id;
             self.current_route = self.current().route_id;
+            self.invalidate_current_grid_for_full_redraw();
         }
     }
 
@@ -925,6 +945,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         }
 
         self.current_route = self.current().route_id;
+        self.invalidate_current_grid_for_full_redraw();
     }
 
     #[inline]
@@ -942,6 +963,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         }
 
         self.current_route = self.current().route_id;
+        self.invalidate_current_grid_for_full_redraw();
     }
 
     #[inline]
@@ -1133,12 +1155,10 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
 
             let current = self.current();
             let cursor = current.cursor_from_ref();
-            let mut dimension = current.dimension;
-
-            // If current has splits then shouldn't use that dimension
-            if self.current_grid().len() > 1 {
-                dimension = self.current_grid().grid_dimension();
-            }
+            // A new tab must start from the current grid's window-level geometry.
+            // `current.dimension` can already be panel-local or margin-adjusted,
+            // which would make the new tab subtract margins a second time.
+            let dimension = self.current_grid().grid_dimension();
 
             match ContextManager::create_context(
                 (&cursor, current.renderable_content.has_blinking_enabled),
@@ -1161,6 +1181,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
                     if redirect {
                         self.current_index = last_index;
                         self.current_route = self.current().route_id;
+                        self.invalidate_current_grid_for_full_redraw();
                     }
                 }
                 Err(..) => {
@@ -1235,6 +1256,9 @@ pub fn process_open_url(
 pub mod test {
     use super::*;
     use crate::event::VoidListener;
+    use rio_backend::config::layout::Margin;
+    use rio_backend::event::TerminalDamage;
+    use rio_backend::sugarloaf::layout::TextDimensions;
 
     #[test]
     fn test_capacity() {
@@ -1268,6 +1292,42 @@ pub mod test {
         context_manager.add_context(should_redirect, 0);
         assert_eq!(context_manager.capacity, 5);
         assert_eq!(context_manager.current_index, 2);
+    }
+
+    #[test]
+    fn test_add_context_uses_current_grid_dimension_for_new_tab() {
+        let window_id: WindowId = WindowId::from(0);
+
+        let mut context_manager =
+            ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+
+        let text_dimensions = TextDimensions {
+            width: 10.0,
+            height: 20.0,
+            scale: 1.0,
+        };
+
+        context_manager.current_mut().dimension = ContextDimension::build(
+            1160.0,
+            730.0,
+            text_dimensions,
+            1.0,
+            Margin::default(),
+        );
+        context_manager.contexts[0].width = 1200.0;
+        context_manager.contexts[0].height = 800.0;
+        context_manager.contexts[0].scaled_margin = Margin::new(40.0, 20.0, 30.0, 20.0);
+
+        context_manager.add_context(true, 1);
+
+        let new_dimension = context_manager.current().dimension;
+        assert_eq!(context_manager.current_index, 1);
+        assert_eq!(new_dimension.width, 1200.0);
+        assert_eq!(new_dimension.height, 800.0);
+        assert_eq!(new_dimension.margin.top, 40.0);
+        assert_eq!(new_dimension.margin.right, 20.0);
+        assert_eq!(new_dimension.margin.bottom, 30.0);
+        assert_eq!(new_dimension.margin.left, 20.0);
     }
 
     #[test]
@@ -1315,6 +1375,32 @@ pub mod test {
 
         context_manager.set_current(8);
         assert_eq!(context_manager.current_index, 3);
+    }
+
+    #[test]
+    fn test_set_current_invalidates_new_current_grid_for_full_redraw() {
+        let window_id: WindowId = WindowId::from(0);
+
+        let mut context_manager =
+            ContextManager::start_with_capacity(5, VoidListener {}, window_id).unwrap();
+        context_manager.add_context(true, 0);
+
+        let pending = &mut context_manager
+            .current_mut()
+            .renderable_content
+            .pending_update;
+        assert!(pending.is_dirty());
+        assert_eq!(pending.take_terminal_damage(), Some(TerminalDamage::Full));
+
+        pending.reset();
+        context_manager.set_current(0);
+
+        let pending = &mut context_manager
+            .current_mut()
+            .renderable_content
+            .pending_update;
+        assert!(pending.is_dirty());
+        assert_eq!(pending.take_terminal_damage(), Some(TerminalDamage::Full));
     }
 
     #[test]

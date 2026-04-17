@@ -1094,13 +1094,12 @@ impl Renderer {
             let has_overlays = !terminal_snapshot.kitty_placements.is_empty();
             let has_virtual = !terminal_snapshot.kitty_virtual_placements.is_empty();
             if has_overlays || has_virtual {
-                let line_height = sugarloaf.style().line_height;
                 let content = sugarloaf.content();
                 content.sel(context.rich_text_id);
                 content.clear_image_overlays();
                 let layout = context.dimension;
                 let cell_width = layout.dimension.width;
-                let cell_height = layout.dimension.height * line_height;
+                let cell_height = layout.dimension.height;
                 let origin_x = panel_rect[0] + grid_scaled_margin.left;
                 let origin_y = panel_rect[1] + grid_scaled_margin.top;
 
