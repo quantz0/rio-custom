@@ -44,6 +44,14 @@ pub struct ResizeState {
     pub original_sizes: (f32, f32),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 fn compute(
     width: f32,
     height: f32,
@@ -87,6 +95,92 @@ fn create_border(color: [f32; 4], position: [f32; 2], size: [f32; 2]) -> Object 
     Object::Rect(Rect::new(position[0], position[1], size[0], size[1], color))
 }
 
+fn collect_tree_nodes(tree: &TaffyTree<()>, root_node: NodeId) -> Vec<NodeId> {
+    let mut nodes = Vec::new();
+    let mut stack = vec![root_node];
+
+    while let Some(node) = stack.pop() {
+        nodes.push(node);
+
+        if let Ok(children) = tree.children(node) {
+            for child in children {
+                stack.push(child);
+            }
+        }
+    }
+
+    nodes
+}
+
+fn collect_path_to_root(
+    tree: &TaffyTree<()>,
+    root_node: NodeId,
+    node_id: NodeId,
+) -> Vec<NodeId> {
+    let mut path = vec![node_id];
+    let mut current = node_id;
+
+    while current != root_node {
+        let Some(parent) = tree.parent(current) else {
+            break;
+        };
+
+        path.push(parent);
+        current = parent;
+    }
+
+    if !path.contains(&root_node) {
+        path.push(root_node);
+    }
+
+    path.reverse();
+    path
+}
+
+fn capture_tree_styles(
+    tree: &TaffyTree<()>,
+    root_node: NodeId,
+) -> Result<FxHashMap<NodeId, Style>, TaffyError> {
+    let mut styles = FxHashMap::default();
+
+    for node in collect_tree_nodes(tree, root_node) {
+        styles.insert(node, tree.style(node)?.clone());
+    }
+
+    Ok(styles)
+}
+
+fn apply_zoomed_panel_styles(
+    tree: &mut TaffyTree<()>,
+    root_node: NodeId,
+    current: NodeId,
+    snapshot: &FxHashMap<NodeId, Style>,
+) -> Result<(), TaffyError> {
+    let path = collect_path_to_root(tree, root_node, current);
+
+    for node in collect_tree_nodes(tree, root_node) {
+        let Some(mut style) = snapshot.get(&node).cloned() else {
+            continue;
+        };
+
+        if node == root_node || path.contains(&node) {
+            style.display = Display::Flex;
+
+            if node != root_node {
+                style.flex_basis = taffy::Dimension::auto();
+                style.flex_grow = 1.0;
+                style.flex_shrink = 1.0;
+            }
+        } else {
+            style.display = Display::None;
+        }
+
+        tree.set_style(node, style)?;
+    }
+
+    Ok(())
+}
+
 /// Separator configuration for split panels
 #[derive(Debug, Clone, Copy)]
 pub struct BorderConfig {
@@ -115,6 +209,7 @@ pub struct ContextGrid<T: EventListener> {
     tree: TaffyTree<()>,
     root_node: NodeId,
     border_config: BorderConfig,
+    zoomed_panel_styles: Option<FxHashMap<NodeId, Style>>,
 }
 
 pub struct ContextGridItem<T: EventListener> {
@@ -243,6 +338,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             tree,
             root_node,
             border_config,
+            zoomed_panel_styles: None,
         };
         grid.calculate_positions();
         grid
@@ -273,8 +369,22 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         self.inner.len()
     }
 
+    fn visible_panel_count(&self) -> usize {
+        self.inner
+            .keys()
+            .filter(|&&node_id| self.is_node_visible(node_id))
+            .count()
+    }
+
     pub fn should_draw_borders(&self) -> bool {
-        self.panel_count() > 1
+        self.visible_panel_count() > 1
+    }
+
+    fn is_node_visible(&self, node_id: NodeId) -> bool {
+        self.tree
+            .style(node_id)
+            .map(|style| style.display != Display::None)
+            .unwrap_or(false)
     }
 
     fn try_update_size(&mut self, width: f32, height: f32) -> Result<(), TaffyError> {
@@ -336,6 +446,10 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         let adj_y = y - self.scaled_margin.top;
 
         for (&node_id, item) in &self.inner {
+            if !self.is_node_visible(node_id) {
+                continue;
+            }
+
             let [left, top, width, height] = item.layout_rect;
             if adj_x >= left
                 && adj_x < left + width
@@ -351,7 +465,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
     /// Find a draggable border near the given mouse position (physical pixels).
     /// Returns None if no border is within the hit threshold.
     pub fn find_border_at_position(&self, x: f32, y: f32) -> Option<PanelBorder> {
-        if self.inner.len() <= 1 {
+        if !self.should_draw_borders() {
             return None;
         }
 
@@ -571,6 +685,62 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         self.scaled_margin
     }
 
+    fn restore_zoomed_panel_styles(&mut self) -> Result<bool, TaffyError> {
+        let Some(snapshot) = self.zoomed_panel_styles.take() else {
+            return Ok(false);
+        };
+
+        for node in collect_tree_nodes(&self.tree, self.root_node) {
+            let Some(style) = snapshot.get(&node) else {
+                continue;
+            };
+
+            self.tree.set_style(node, style.clone())?;
+        }
+
+        Ok(true)
+    }
+
+    fn ensure_unzoomed(&mut self, sugarloaf: &mut Sugarloaf) -> bool {
+        match self.restore_zoomed_panel_styles() {
+            Ok(true) => self.apply_taffy_layout(sugarloaf),
+            Ok(false) | Err(_) => false,
+        }
+    }
+
+    pub fn toggle_current_split_zoom(&mut self, sugarloaf: &mut Sugarloaf) -> bool {
+        match self.restore_zoomed_panel_styles() {
+            Ok(true) => {
+                return self.apply_taffy_layout(sugarloaf);
+            }
+            Ok(false) => {}
+            Err(_) => return false,
+        }
+
+        if self.panel_count() <= 1 || !self.inner.contains_key(&self.current) {
+            return false;
+        }
+
+        let snapshot = match capture_tree_styles(&self.tree, self.root_node) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return false,
+        };
+
+        if apply_zoomed_panel_styles(
+            &mut self.tree,
+            self.root_node,
+            self.current,
+            &snapshot,
+        )
+        .is_err()
+        {
+            return false;
+        }
+
+        self.zoomed_panel_styles = Some(snapshot);
+        self.apply_taffy_layout(sugarloaf)
+    }
+
     fn create_panel_style(&self) -> Style {
         let scale = self.scale;
         Style {
@@ -780,7 +950,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
     }
 
     fn find_horizontal_neighbors(&self, node_id: NodeId) -> Option<(NodeId, NodeId)> {
-        if !self.inner.contains_key(&node_id) {
+        if !self.inner.contains_key(&node_id) || !self.is_node_visible(node_id) {
             return None;
         }
         let current_layout = self.tree.layout(node_id).ok()?;
@@ -789,7 +959,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
         // Find panel directly to the left (overlapping Y range, touching on X axis)
         for &other_id in self.inner.keys() {
-            if other_id == node_id {
+            if other_id == node_id || !self.is_node_visible(other_id) {
                 continue;
             }
 
@@ -815,7 +985,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         // Try finding panel to the right
         let current_right = current_layout.location.x + current_layout.size.width;
         for &other_id in self.inner.keys() {
-            if other_id == node_id {
+            if other_id == node_id || !self.is_node_visible(other_id) {
                 continue;
             }
 
@@ -840,7 +1010,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
     }
 
     fn find_vertical_neighbors(&self, node_id: NodeId) -> Option<(NodeId, NodeId)> {
-        if !self.inner.contains_key(&node_id) {
+        if !self.inner.contains_key(&node_id) || !self.is_node_visible(node_id) {
             return None;
         }
         let current_layout = self.tree.layout(node_id).ok()?;
@@ -849,7 +1019,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
         // Find panel directly above (overlapping X range, touching on Y axis)
         for &other_id in self.inner.keys() {
-            if other_id == node_id {
+            if other_id == node_id || !self.is_node_visible(other_id) {
                 continue;
             }
 
@@ -875,7 +1045,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         // Try finding panel below
         let current_bottom = current_layout.location.y + current_layout.size.height;
         for &other_id in self.inner.keys() {
-            if other_id == node_id {
+            if other_id == node_id || !self.is_node_visible(other_id) {
                 continue;
             }
 
@@ -899,15 +1069,147 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         None
     }
 
+    fn find_adjacent_panel(
+        &self,
+        node_id: NodeId,
+        direction: FocusDirection,
+    ) -> Option<NodeId> {
+        if !self.inner.contains_key(&node_id) || !self.is_node_visible(node_id) {
+            return None;
+        }
+
+        let current_item = self.inner.get(&node_id)?;
+        let [current_left, current_top, current_width, current_height] =
+            current_item.layout_rect;
+        let current_right = current_left + current_width;
+        let current_bottom = current_top + current_height;
+        let current_center_x = current_left + current_width / 2.0;
+        let current_center_y = current_top + current_height / 2.0;
+        let max_distance = match direction {
+            FocusDirection::Left | FocusDirection::Right => {
+                (self.panel_config.column_gap
+                    + self.panel_config.margin.left
+                    + self.panel_config.margin.right)
+                    * self.scale
+            }
+            FocusDirection::Up | FocusDirection::Down => {
+                (self.panel_config.row_gap
+                    + self.panel_config.margin.top
+                    + self.panel_config.margin.bottom)
+                    * self.scale
+            }
+        };
+
+        let mut best: Option<(NodeId, f32, f32, f32, f32)> = None;
+
+        for &other_id in self.inner.keys() {
+            if other_id == node_id || !self.is_node_visible(other_id) {
+                continue;
+            }
+
+            let other_item = self.inner.get(&other_id)?;
+            let [other_left, other_top, other_width, other_height] =
+                other_item.layout_rect;
+            let other_right = other_left + other_width;
+            let other_bottom = other_top + other_height;
+            let overlap;
+            let distance;
+            let center_delta;
+            let tie_breaker;
+
+            match direction {
+                FocusDirection::Left => {
+                    overlap = (current_bottom.min(other_bottom)
+                        - current_top.max(other_top))
+                    .max(0.0);
+                    distance = current_left - other_right;
+                    center_delta =
+                        (current_center_y - (other_top + other_height / 2.0)).abs();
+                    tie_breaker = other_top;
+                }
+                FocusDirection::Right => {
+                    overlap = (current_bottom.min(other_bottom)
+                        - current_top.max(other_top))
+                    .max(0.0);
+                    distance = other_left - current_right;
+                    center_delta =
+                        (current_center_y - (other_top + other_height / 2.0)).abs();
+                    tie_breaker = other_top;
+                }
+                FocusDirection::Up => {
+                    overlap = (current_right.min(other_right)
+                        - current_left.max(other_left))
+                    .max(0.0);
+                    distance = current_top - other_bottom;
+                    center_delta =
+                        (current_center_x - (other_left + other_width / 2.0)).abs();
+                    tie_breaker = other_left;
+                }
+                FocusDirection::Down => {
+                    overlap = (current_right.min(other_right)
+                        - current_left.max(other_left))
+                    .max(0.0);
+                    distance = other_top - current_bottom;
+                    center_delta =
+                        (current_center_x - (other_left + other_width / 2.0)).abs();
+                    tie_breaker = other_left;
+                }
+            }
+
+            if overlap <= 0.0 || distance < 0.0 || distance > max_distance + 1.0 {
+                continue;
+            }
+
+            let should_replace = match best {
+                None => true,
+                Some((_, best_overlap, best_distance, best_center_delta, best_tie)) => {
+                    overlap > best_overlap + 0.5
+                        || ((overlap - best_overlap).abs() <= 0.5
+                            && distance < best_distance - 0.5)
+                        || ((overlap - best_overlap).abs() <= 0.5
+                            && (distance - best_distance).abs() <= 0.5
+                            && center_delta < best_center_delta - 0.5)
+                        || ((overlap - best_overlap).abs() <= 0.5
+                            && (distance - best_distance).abs() <= 0.5
+                            && (center_delta - best_center_delta).abs() <= 0.5
+                            && tie_breaker < best_tie)
+                }
+            };
+
+            if should_replace {
+                best = Some((other_id, overlap, distance, center_delta, tie_breaker));
+            }
+        }
+
+        best.map(|(other_id, _, _, _, _)| other_id)
+    }
+
     fn apply_taffy_layout(&mut self, sugarloaf: &mut Sugarloaf) -> bool {
         if self.compute_layout().is_err() {
             return false;
         }
 
         let scale = sugarloaf.ctx.scale();
-        let is_multi_panel = self.inner.len() > 1;
+        let visible_nodes: FxHashMap<NodeId, bool> = self
+            .inner
+            .keys()
+            .map(|&node_id| (node_id, self.is_node_visible(node_id)))
+            .collect();
+        let is_multi_panel = visible_nodes
+            .values()
+            .filter(|&&is_visible| is_visible)
+            .count()
+            > 1;
 
-        for item in self.inner.values_mut() {
+        for (node_id, item) in self.inner.iter_mut() {
+            let is_visible = visible_nodes.get(node_id).copied().unwrap_or(true);
+            sugarloaf.set_visibility(item.val.rich_text_id, is_visible);
+
+            if !is_visible {
+                sugarloaf.set_bounds(item.val.rich_text_id, None);
+                continue;
+            }
+
             let [abs_x, abs_y, width, height] = item.layout_rect;
 
             let x = (abs_x + self.scaled_margin.left) / scale;
@@ -955,6 +1257,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         let mut panels: Vec<(NodeId, f32, f32)> = self
             .inner
             .iter()
+            .filter(|(id, _)| self.is_node_visible(**id))
             .map(|(&id, item)| (id, item.layout_rect[1], item.layout_rect[0])) // (id, y, x)
             .collect();
 
@@ -970,7 +1273,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
     #[inline]
     pub fn select_next_split(&mut self) {
-        if self.inner.len() == 1 {
+        if self.visible_panel_count() <= 1 {
             return;
         }
 
@@ -986,7 +1289,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
     #[inline]
     pub fn select_next_split_no_loop(&mut self) -> bool {
-        if self.inner.len() == 1 {
+        if self.visible_panel_count() <= 1 {
             return false;
         }
 
@@ -1004,7 +1307,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
     #[inline]
     pub fn select_prev_split(&mut self) {
-        if self.inner.len() == 1 {
+        if self.visible_panel_count() <= 1 {
             return;
         }
 
@@ -1020,7 +1323,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
     #[inline]
     pub fn select_prev_split_no_loop(&mut self) -> bool {
-        if self.inner.len() == 1 {
+        if self.visible_panel_count() <= 1 {
             return false;
         }
 
@@ -1126,7 +1429,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
     /// Select panel based on mouse position using Taffy layout.
     /// Returns true only when focus actually changed to a different panel.
     pub fn select_current_based_on_mouse(&mut self, mouse: &Mouse) -> bool {
-        if self.inner.len() <= 1 {
+        if self.visible_panel_count() <= 1 {
             return false;
         }
 
@@ -1142,6 +1445,82 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         }
 
         false
+    }
+
+    pub fn select_split_left(&mut self) -> bool {
+        let visible_panel_count = self.visible_panel_count();
+        if visible_panel_count <= 1 {
+            return false;
+        }
+
+        let Some(next) = self.find_adjacent_panel(self.current, FocusDirection::Left)
+        else {
+            return false;
+        };
+
+        if next == self.current {
+            return false;
+        }
+
+        self.current = next;
+        true
+    }
+
+    pub fn select_split_right(&mut self) -> bool {
+        let visible_panel_count = self.visible_panel_count();
+        if visible_panel_count <= 1 {
+            return false;
+        }
+
+        let Some(next) = self.find_adjacent_panel(self.current, FocusDirection::Right)
+        else {
+            return false;
+        };
+
+        if next == self.current {
+            return false;
+        }
+
+        self.current = next;
+        true
+    }
+
+    pub fn select_split_up(&mut self) -> bool {
+        let visible_panel_count = self.visible_panel_count();
+        if visible_panel_count <= 1 {
+            return false;
+        }
+
+        let Some(next) = self.find_adjacent_panel(self.current, FocusDirection::Up)
+        else {
+            return false;
+        };
+
+        if next == self.current {
+            return false;
+        }
+
+        self.current = next;
+        true
+    }
+
+    pub fn select_split_down(&mut self) -> bool {
+        let visible_panel_count = self.visible_panel_count();
+        if visible_panel_count <= 1 {
+            return false;
+        }
+
+        let Some(next) = self.find_adjacent_panel(self.current, FocusDirection::Down)
+        else {
+            return false;
+        };
+
+        if next == self.current {
+            return false;
+        }
+
+        self.current = next;
+        true
     }
 
     #[inline]
@@ -1233,6 +1612,8 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             return;
         }
 
+        self.ensure_unzoomed(sugarloaf);
+
         // Can't remove the last panel
         if self.inner.len() == 1 {
             tracing::warn!("Cannot remove the last remaining context");
@@ -1311,6 +1692,8 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             return;
         }
 
+        self.ensure_unzoomed(sugarloaf);
+
         // Create taffy node first, then item
         if let Ok(new_node) = self.try_split_right() {
             let new_context = ContextGridItem::new(context);
@@ -1326,6 +1709,8 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             return;
         }
 
+        self.ensure_unzoomed(sugarloaf);
+
         // Create taffy node first, then item
         if let Ok(new_node) = self.try_split_down() {
             let new_context = ContextGridItem::new(context);
@@ -1336,6 +1721,8 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
     }
 
     pub fn move_divider_up(&mut self, amount: f32, sugarloaf: &mut Sugarloaf) -> bool {
+        self.ensure_unzoomed(sugarloaf);
+
         if self.panel_count() <= 1 {
             return false;
         }
@@ -1387,6 +1774,8 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
     }
 
     pub fn move_divider_down(&mut self, amount: f32, sugarloaf: &mut Sugarloaf) -> bool {
+        self.ensure_unzoomed(sugarloaf);
+
         if self.panel_count() <= 1 {
             return false;
         }
@@ -1438,6 +1827,8 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
     }
 
     pub fn move_divider_left(&mut self, amount: f32, sugarloaf: &mut Sugarloaf) -> bool {
+        self.ensure_unzoomed(sugarloaf);
+
         if self.panel_count() <= 1 {
             return false;
         }
@@ -1490,6 +1881,8 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
     }
 
     pub fn move_divider_right(&mut self, amount: f32, sugarloaf: &mut Sugarloaf) -> bool {
+        self.ensure_unzoomed(sugarloaf);
+
         if self.panel_count() <= 1 {
             return false;
         }

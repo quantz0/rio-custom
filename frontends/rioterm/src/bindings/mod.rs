@@ -256,8 +256,13 @@ impl From<String> for Action {
             "splitdown" => Some(Action::SplitDown),
             "selectnextsplit" => Some(Action::SelectNextSplit),
             "selectprevsplit" => Some(Action::SelectPrevSplit),
+            "selectsplitleft" => Some(Action::SelectSplitLeft),
+            "selectsplitright" => Some(Action::SelectSplitRight),
+            "selectsplitup" => Some(Action::SelectSplitUp),
+            "selectsplitdown" => Some(Action::SelectSplitDown),
             "selectnextsplitortab" => Some(Action::SelectNextSplitOrTab),
             "selectprevsplitortab" => Some(Action::SelectPrevSplitOrTab),
+            "togglesplitzoom" => Some(Action::ToggleSplitZoom),
             "movedividerup" => Some(Action::MoveDividerUp),
             "movedividerdown" => Some(Action::MoveDividerDown),
             "movedividerleft" => Some(Action::MoveDividerLeft),
@@ -484,11 +489,26 @@ pub enum Action {
     /// Select previous split
     SelectPrevSplit,
 
+    /// Select the adjacent split to the left
+    SelectSplitLeft,
+
+    /// Select the adjacent split to the right
+    SelectSplitRight,
+
+    /// Select the adjacent split above
+    SelectSplitUp,
+
+    /// Select the adjacent split below
+    SelectSplitDown,
+
     /// Select next split if available if not next tab
     SelectNextSplitOrTab,
 
     /// Select previous split if available if not previous tab
     SelectPrevSplitOrTab,
+
+    /// Maximize the current split and restore the previous layout on repeat.
+    ToggleSplitZoom,
 
     /// Move divider up
     MoveDividerUp,

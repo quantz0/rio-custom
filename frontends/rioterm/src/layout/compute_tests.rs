@@ -1,4 +1,6 @@
 use super::*;
+use crate::context::create_dead_context;
+use rio_backend::event::{VoidListener, WindowId};
 
 // This file tests compute function on different layouts.
 // I've added some real scenarios so I can make sure it doesn't go off again.
@@ -577,4 +579,396 @@ fn test_split_inside_resized_panel_preserves_proportions() {
         (bottom_h - 400.0).abs() < 1.0,
         "Bottom (bottom half) should be ~400px tall, got {bottom_h}"
     );
+}
+
+#[test]
+fn test_apply_zoomed_panel_styles_hides_non_selected_branch_and_restores() {
+    use taffy::{FlexDirection, TaffyTree};
+
+    let mut tree: TaffyTree<()> = TaffyTree::new();
+
+    let root = tree
+        .new_leaf(Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            size: geometry::Size {
+                width: length(1200.0),
+                height: length(800.0),
+            },
+            ..Default::default()
+        })
+        .unwrap();
+
+    let left = tree
+        .new_leaf(Style {
+            display: Display::Flex,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            ..Default::default()
+        })
+        .unwrap();
+
+    let right_container = tree
+        .new_leaf(Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            ..Default::default()
+        })
+        .unwrap();
+
+    let right_top = tree
+        .new_leaf(Style {
+            display: Display::Flex,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            ..Default::default()
+        })
+        .unwrap();
+
+    let right_bottom = tree
+        .new_leaf(Style {
+            display: Display::Flex,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            ..Default::default()
+        })
+        .unwrap();
+
+    tree.add_child(root, left).unwrap();
+    tree.add_child(root, right_container).unwrap();
+    tree.add_child(right_container, right_top).unwrap();
+    tree.add_child(right_container, right_bottom).unwrap();
+
+    let available = geometry::Size {
+        width: AvailableSpace::MaxContent,
+        height: AvailableSpace::MaxContent,
+    };
+
+    tree.compute_layout(root, available).unwrap();
+    let original_left_width = tree.layout(left).unwrap().size.width;
+    let original_right_top_width = tree.layout(right_top).unwrap().size.width;
+
+    let snapshot = capture_tree_styles(&tree, root).unwrap();
+    apply_zoomed_panel_styles(&mut tree, root, right_bottom, &snapshot).unwrap();
+    tree.compute_layout(root, available).unwrap();
+
+    assert_eq!(tree.style(left).unwrap().display, Display::None);
+    assert_eq!(tree.style(right_top).unwrap().display, Display::None);
+    assert_eq!(tree.style(right_container).unwrap().display, Display::Flex);
+
+    let zoomed_bottom = tree.layout(right_bottom).unwrap();
+    assert!(
+        (zoomed_bottom.size.width - 1200.0).abs() < 1.0,
+        "zoomed width should fill the root, got {}",
+        zoomed_bottom.size.width
+    );
+    assert!(
+        (zoomed_bottom.size.height - 800.0).abs() < 1.0,
+        "zoomed height should fill the root, got {}",
+        zoomed_bottom.size.height
+    );
+
+    for node in collect_tree_nodes(&tree, root) {
+        if let Some(style) = snapshot.get(&node) {
+            tree.set_style(node, style.clone()).unwrap();
+        }
+    }
+    tree.compute_layout(root, available).unwrap();
+
+    assert_eq!(tree.style(left).unwrap().display, Display::Flex);
+    assert_eq!(tree.style(right_top).unwrap().display, Display::Flex);
+
+    let restored_left_width = tree.layout(left).unwrap().size.width;
+    let restored_right_top_width = tree.layout(right_top).unwrap().size.width;
+
+    assert!(
+        (restored_left_width - original_left_width).abs() < 1.0,
+        "left width should restore to {original_left_width}, got {restored_left_width}"
+    );
+    assert!(
+        (restored_right_top_width - original_right_top_width).abs() < 1.0,
+        "right-top width should restore to {original_right_top_width}, got {restored_right_top_width}"
+    );
+}
+
+#[test]
+fn test_directional_focus_prefers_overlapping_adjacent_panel() {
+    use taffy::{FlexDirection, TaffyTree};
+
+    let mut tree: TaffyTree<()> = TaffyTree::new();
+    let available = geometry::Size {
+        width: AvailableSpace::MaxContent,
+        height: AvailableSpace::MaxContent,
+    };
+
+    let root = tree
+        .new_leaf(Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            gap: geometry::Size {
+                width: length(10.0),
+                height: length(0.0),
+            },
+            size: geometry::Size {
+                width: length(1210.0),
+                height: length(900.0),
+            },
+            ..Default::default()
+        })
+        .unwrap();
+
+    let left_container = tree
+        .new_leaf(Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            gap: geometry::Size {
+                width: length(0.0),
+                height: length(10.0),
+            },
+            ..Default::default()
+        })
+        .unwrap();
+
+    let right = tree
+        .new_leaf(Style {
+            display: Display::Flex,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            ..Default::default()
+        })
+        .unwrap();
+
+    let top_left = tree
+        .new_leaf(Style {
+            display: Display::Flex,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            ..Default::default()
+        })
+        .unwrap();
+
+    let bottom_left = tree
+        .new_leaf(Style {
+            display: Display::Flex,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            ..Default::default()
+        })
+        .unwrap();
+
+    tree.add_child(root, left_container).unwrap();
+    tree.add_child(root, right).unwrap();
+    tree.add_child(left_container, top_left).unwrap();
+    tree.add_child(left_container, bottom_left).unwrap();
+
+    tree.compute_layout(root, available).unwrap();
+
+    let selected = {
+        let current_layout = tree.layout(right).unwrap();
+        let current_bottom = current_layout.location.y + current_layout.size.height;
+        let current_center_y =
+            current_layout.location.y + current_layout.size.height / 2.0;
+        let mut best: Option<(NodeId, f32, f32, f32, f32)> = None;
+
+        for other in [top_left, bottom_left] {
+            let other_layout = tree.layout(other).unwrap();
+            let other_bottom = other_layout.location.y + other_layout.size.height;
+            let overlap = (current_bottom.min(other_bottom)
+                - current_layout.location.y.max(other_layout.location.y))
+            .max(0.0);
+            let distance = current_layout.location.x
+                - (other_layout.location.x + other_layout.size.width);
+            let center_delta = (current_center_y
+                - (other_layout.location.y + other_layout.size.height / 2.0))
+                .abs();
+            let tie_breaker = other_layout.location.y;
+
+            if overlap <= 0.0 || distance < 0.0 || distance > 11.0 {
+                continue;
+            }
+
+            let should_replace = match best {
+                None => true,
+                Some((_, best_overlap, best_distance, best_center_delta, best_tie)) => {
+                    overlap > best_overlap + 0.5
+                        || ((overlap - best_overlap).abs() <= 0.5
+                            && distance < best_distance - 0.5)
+                        || ((overlap - best_overlap).abs() <= 0.5
+                            && (distance - best_distance).abs() <= 0.5
+                            && center_delta < best_center_delta - 0.5)
+                        || ((overlap - best_overlap).abs() <= 0.5
+                            && (distance - best_distance).abs() <= 0.5
+                            && (center_delta - best_center_delta).abs() <= 0.5
+                            && tie_breaker < best_tie)
+                }
+            };
+
+            if should_replace {
+                best = Some((other, overlap, distance, center_delta, tie_breaker));
+            }
+        }
+
+        best.map(|(node, _, _, _, _)| node)
+    };
+
+    assert_eq!(
+        selected,
+        Some(top_left),
+        "focusing left from a full-height panel should choose the upper overlapping neighbor first"
+    );
+}
+
+#[test]
+fn test_select_split_right_uses_absolute_panel_positions_for_nested_splits() {
+    let text_dimensions = TextDimensions {
+        width: 10.0,
+        height: 20.0,
+        scale: 1.0,
+    };
+    let dimension =
+        ContextDimension::build(1210.0, 900.0, text_dimensions, 1.0, Margin::all(0.0));
+    let panel_config = rio_backend::config::layout::Panel {
+        margin: Margin::all(0.0),
+        padding: Margin::all(0.0),
+        row_gap: 10.0,
+        column_gap: 10.0,
+        border_width: 2.0,
+        border_radius: 0.0,
+    };
+    let mut grid = ContextGrid::new(
+        create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
+        Margin::all(0.0),
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+        panel_config,
+    );
+
+    let left = grid.current;
+
+    let right = grid.try_split_right().unwrap();
+    grid.inner.insert(
+        right,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            2,
+            2,
+            dimension,
+        )),
+    );
+    grid.calculate_positions();
+
+    grid.current = right;
+    let bottom_right = grid.try_split_down().unwrap();
+    grid.inner.insert(
+        bottom_right,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            3,
+            3,
+            dimension,
+        )),
+    );
+    grid.calculate_positions();
+
+    grid.current = left;
+    assert!(
+        grid.select_split_right(),
+        "moving right from the left panel should find the nested right branch"
+    );
+    assert_eq!(
+        grid.current, right,
+        "directional focus should choose the upper overlapping panel on the right"
+    );
+}
+
+#[test]
+fn test_select_split_right_respects_panel_margins_without_explicit_gap() {
+    let text_dimensions = TextDimensions {
+        width: 10.0,
+        height: 20.0,
+        scale: 1.0,
+    };
+    let dimension =
+        ContextDimension::build(1210.0, 900.0, text_dimensions, 1.0, Margin::all(0.0));
+    let panel_config = rio_backend::config::layout::Panel {
+        padding: Margin::all(0.0),
+        ..rio_backend::config::layout::Panel::default()
+    };
+    let mut grid = ContextGrid::new(
+        create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
+        Margin::all(0.0),
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+        panel_config,
+    );
+
+    let left = grid.current;
+    let right = grid.try_split_right().unwrap();
+    grid.inner.insert(
+        right,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            2,
+            2,
+            dimension,
+        )),
+    );
+    grid.calculate_positions();
+
+    grid.current = left;
+    assert!(
+        grid.select_split_right(),
+        "panel margins should still allow focusing the panel on the right"
+    );
+    assert_eq!(grid.current, right);
+}
+
+#[test]
+fn test_select_split_down_respects_panel_margins_without_explicit_gap() {
+    let text_dimensions = TextDimensions {
+        width: 10.0,
+        height: 20.0,
+        scale: 1.0,
+    };
+    let dimension =
+        ContextDimension::build(1210.0, 900.0, text_dimensions, 1.0, Margin::all(0.0));
+    let panel_config = rio_backend::config::layout::Panel {
+        padding: Margin::all(0.0),
+        ..rio_backend::config::layout::Panel::default()
+    };
+    let mut grid = ContextGrid::new(
+        create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
+        Margin::all(0.0),
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+        panel_config,
+    );
+
+    let top = grid.current;
+    let bottom = grid.try_split_down().unwrap();
+    grid.inner.insert(
+        bottom,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            2,
+            2,
+            dimension,
+        )),
+    );
+    grid.calculate_positions();
+
+    grid.current = top;
+    assert!(
+        grid.select_split_down(),
+        "panel margins should still allow focusing the panel below"
+    );
+    assert_eq!(grid.current, bottom);
 }

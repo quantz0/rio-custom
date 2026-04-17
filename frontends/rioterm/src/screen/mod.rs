@@ -1196,6 +1196,30 @@ impl Screen<'_> {
                         self.context_manager.select_prev_split();
                         self.render();
                     }
+                    Act::SelectSplitLeft => {
+                        self.cancel_search(clipboard);
+                        if self.context_manager.select_split_left() {
+                            self.render();
+                        }
+                    }
+                    Act::SelectSplitRight => {
+                        self.cancel_search(clipboard);
+                        if self.context_manager.select_split_right() {
+                            self.render();
+                        }
+                    }
+                    Act::SelectSplitUp => {
+                        self.cancel_search(clipboard);
+                        if self.context_manager.select_split_up() {
+                            self.render();
+                        }
+                    }
+                    Act::SelectSplitDown => {
+                        self.cancel_search(clipboard);
+                        if self.context_manager.select_split_down() {
+                            self.render();
+                        }
+                    }
                     Act::SelectNextSplitOrTab => {
                         self.cancel_search(clipboard);
                         self.clear_selection();
@@ -1221,6 +1245,16 @@ impl Screen<'_> {
                             new_index,
                         );
                         self.render();
+                    }
+                    Act::ToggleSplitZoom => {
+                        self.cancel_search(clipboard);
+                        self.clear_selection();
+                        if self
+                            .context_manager
+                            .toggle_current_split_zoom(&mut self.sugarloaf)
+                        {
+                            self.render();
+                        }
                     }
                     Act::SelectTab(tab_index) => {
                         let old_index = self.context_manager.current_index();

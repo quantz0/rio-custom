@@ -381,4 +381,3 @@ If you are missing a key binding that you believe that should be a default in th
 | Search history previous | `ArrowUp` (while search is open)       |
 | Search history next     | `Control + n` (while search is open)   |
 | Search history next     | `ArrowDown` (while search is open)     |
-

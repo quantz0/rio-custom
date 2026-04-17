@@ -584,6 +584,42 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
     }
 
     #[inline]
+    pub fn select_split_left(&mut self) -> bool {
+        let changed = self.contexts[self.current_index].select_split_left();
+        if changed {
+            self.current_route = self.current().route_id;
+        }
+        changed
+    }
+
+    #[inline]
+    pub fn select_split_right(&mut self) -> bool {
+        let changed = self.contexts[self.current_index].select_split_right();
+        if changed {
+            self.current_route = self.current().route_id;
+        }
+        changed
+    }
+
+    #[inline]
+    pub fn select_split_up(&mut self) -> bool {
+        let changed = self.contexts[self.current_index].select_split_up();
+        if changed {
+            self.current_route = self.current().route_id;
+        }
+        changed
+    }
+
+    #[inline]
+    pub fn select_split_down(&mut self) -> bool {
+        let changed = self.contexts[self.current_index].select_split_down();
+        if changed {
+            self.current_route = self.current().route_id;
+        }
+        changed
+    }
+
+    #[inline]
     pub fn switch_to_next_split_or_tab(&mut self) {
         if self.contexts[self.current_index].select_next_split_no_loop() {
             self.current_route = self.current().route_id;
@@ -632,6 +668,14 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
     #[inline]
     pub fn move_divider_right(&mut self, amount: f32, sugarloaf: &mut Sugarloaf) -> bool {
         self.contexts[self.current_index].move_divider_right(amount, sugarloaf)
+    }
+
+    #[inline]
+    pub fn toggle_current_split_zoom(&mut self, sugarloaf: &mut Sugarloaf) -> bool {
+        let toggled =
+            self.contexts[self.current_index].toggle_current_split_zoom(sugarloaf);
+        self.current_route = self.current().route_id;
+        toggled
     }
 
     #[inline]
