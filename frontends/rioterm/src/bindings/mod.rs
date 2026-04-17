@@ -245,6 +245,7 @@ impl From<String> for Action {
             "selectprevtab" => Some(Action::SelectPrevTab),
             "selectnexttab" => Some(Action::SelectNextTab),
             "selectlasttab" => Some(Action::SelectLastTab),
+            "renametab" => Some(Action::RenameTab),
             "receivechar" => Some(Action::ReceiveChar),
             "scrollpageup" => Some(Action::ScrollPageUp),
             "scrollpagedown" => Some(Action::ScrollPageDown),
@@ -469,6 +470,7 @@ pub enum Action {
     // Tab selections
     SelectTab(usize),
     SelectLastTab,
+    RenameTab,
 
     Search(SearchAction),
     /// Start a forward buffer search.
@@ -1546,6 +1548,12 @@ mod tests {
             .iter()
             .any(|b| matches!(b.action, Action::Scroll(_)));
         assert!(has_scroll_actions);
+    }
+
+    #[test]
+    fn action_from_string_rename_tab() {
+        assert_eq!(Action::from(String::from("renametab")), Action::RenameTab);
+        assert_eq!(Action::from(String::from("RenameTab")), Action::RenameTab);
     }
 
     #[test]

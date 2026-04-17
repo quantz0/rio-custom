@@ -1041,9 +1041,25 @@ impl Screen<'_> {
                         if self.ctx().len() <= 1 {
                             return true;
                         }
+                        let retained_index = self.context_manager.current_index();
+                        if let Some(ref mut island) = self.renderer.island {
+                            island.handle_close_unfocused_tabs(retained_index);
+                        }
                         self.context_manager.close_unfocused_tabs();
                         self.resize_top_or_bottom_line(1);
                         self.render();
+                    }
+                    Act::RenameTab => {
+                        if !self.renderer.navigation.is_enabled() {
+                            return true;
+                        }
+
+                        let current_tab = self.context_manager.current_index();
+                        if let Some(ref mut island) = self.renderer.island {
+                            island
+                                .open_rename_for_tab(&self.context_manager, current_tab);
+                            self.render();
+                        }
                     }
                     Act::Quit => {
                         self.context_manager.quit();
@@ -1297,6 +1313,14 @@ impl Screen<'_> {
                         self.cancel_search(clipboard);
                         self.clear_selection();
                         let old_index = self.context_manager.current_index();
+                        let target_index = if old_index == 0 {
+                            self.ctx().len() - 1
+                        } else {
+                            old_index - 1
+                        };
+                        if let Some(ref mut island) = self.renderer.island {
+                            island.handle_tabs_swapped(old_index, target_index);
+                        }
                         self.context_manager.move_current_to_prev();
                         let new_index = self.context_manager.current_index();
                         self.context_manager.switch_context_visibility(
@@ -1310,6 +1334,14 @@ impl Screen<'_> {
                         self.cancel_search(clipboard);
                         self.clear_selection();
                         let old_index = self.context_manager.current_index();
+                        let target_index = if old_index == self.ctx().len() - 1 {
+                            0
+                        } else {
+                            old_index + 1
+                        };
+                        if let Some(ref mut island) = self.renderer.island {
+                            island.handle_tabs_swapped(old_index, target_index);
+                        }
                         self.context_manager.move_current_to_next();
                         let new_index = self.context_manager.current_index();
                         self.context_manager.switch_context_visibility(
@@ -1482,6 +1514,12 @@ impl Screen<'_> {
 
     pub fn close_tab(&mut self, clipboard: &mut Clipboard) {
         self.clear_selection();
+        let removed_index = self.context_manager.current_index();
+        if self.ctx().len() > 1 {
+            if let Some(ref mut island) = self.renderer.island {
+                island.handle_tab_closed(removed_index);
+            }
+        }
         self.context_manager
             .close_current_context(&mut self.sugarloaf);
 
@@ -2604,28 +2642,8 @@ impl Screen<'_> {
 
         // Control + click → toggle color picker for that tab
         if self.modifiers.state().control_key() {
-            // Get current displayed title for the rename input
-            let current_title = self
-                .context_manager
-                .titles
-                .titles
-                .get(&clicked_tab)
-                .and_then(|t| {
-                    if !t.content.is_empty() {
-                        Some(t.content.clone())
-                    } else {
-                        t.extra.as_ref().and_then(|e| {
-                            if !e.program.is_empty() {
-                                Some(e.program.clone())
-                            } else {
-                                None
-                            }
-                        })
-                    }
-                })
-                .unwrap_or_else(|| String::from("~"));
             if let Some(ref mut island) = self.renderer.island {
-                island.toggle_color_picker(clicked_tab, &current_title);
+                island.toggle_color_picker(&self.context_manager, clicked_tab);
                 self.render();
             }
             return true;
@@ -3226,9 +3244,51 @@ impl Screen<'_> {
             PaletteAction::TabClose => self.close_tab(clipboard),
             PaletteAction::TabCloseUnfocused => {
                 if self.ctx().len() > 1 {
+                    let retained_index = self.context_manager.current_index();
+                    if let Some(ref mut island) = self.renderer.island {
+                        island.handle_close_unfocused_tabs(retained_index);
+                    }
                     self.context_manager.close_unfocused_tabs();
                     self.resize_top_or_bottom_line(1);
                 }
+            }
+            PaletteAction::MoveCurrentTabToPrev => {
+                self.clear_selection();
+                let old = self.context_manager.current_index();
+                let target_index = if old == 0 {
+                    self.ctx().len() - 1
+                } else {
+                    old - 1
+                };
+                if let Some(ref mut island) = self.renderer.island {
+                    island.handle_tabs_swapped(old, target_index);
+                }
+                self.context_manager.move_current_to_prev();
+                let new = self.context_manager.current_index();
+                self.context_manager.switch_context_visibility(
+                    &mut self.sugarloaf,
+                    old,
+                    new,
+                );
+            }
+            PaletteAction::MoveCurrentTabToNext => {
+                self.clear_selection();
+                let old = self.context_manager.current_index();
+                let target_index = if old == self.ctx().len() - 1 {
+                    0
+                } else {
+                    old + 1
+                };
+                if let Some(ref mut island) = self.renderer.island {
+                    island.handle_tabs_swapped(old, target_index);
+                }
+                self.context_manager.move_current_to_next();
+                let new = self.context_manager.current_index();
+                self.context_manager.switch_context_visibility(
+                    &mut self.sugarloaf,
+                    old,
+                    new,
+                );
             }
             PaletteAction::SelectNextTab => {
                 self.clear_selection();

@@ -628,15 +628,16 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     }
                 }
             }
-            RioEventType::Rio(RioEvent::PtyWrite(text)) => {
+            RioEventType::Rio(RioEvent::PtyWrite(route_id, text)) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
-                    route
-                        .window
-                        .screen
-                        .ctx_mut()
-                        .current_mut()
-                        .messenger
-                        .send_bytes(text.into_bytes());
+                    if let Some(context) =
+                        route.window.screen.ctx_mut().get_by_route_id(route_id)
+                    {
+                        context
+                            .context_mut()
+                            .messenger
+                            .send_bytes(text.into_bytes());
+                    }
                 }
             }
             RioEventType::Rio(RioEvent::TextAreaSizeRequest(format)) => {

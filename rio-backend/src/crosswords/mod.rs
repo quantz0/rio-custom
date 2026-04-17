@@ -1806,7 +1806,10 @@ impl<U: EventListener> Handler for Crosswords<U> {
         };
 
         self.event_proxy.send_event(
-            RioEvent::PtyWrite(format!("\x1b[{};{}$y", mode.raw(), state as u8,)),
+            RioEvent::PtyWrite(
+                self.route_id,
+                format!("\x1b[{};{}$y", mode.raw(), state as u8,),
+            ),
             self.window_id,
         );
     }
@@ -2014,7 +2017,10 @@ impl<U: EventListener> Handler for Crosswords<U> {
         };
 
         self.event_proxy.send_event(
-            RioEvent::PtyWrite(format!("\x1b[?{};{}$y", mode.raw(), state as u8,)),
+            RioEvent::PtyWrite(
+                self.route_id,
+                format!("\x1b[?{};{}$y", mode.raw(), state as u8,),
+            ),
             self.window_id,
         );
     }
@@ -2605,14 +2611,14 @@ impl<U: EventListener> Handler for Crosswords<U> {
                 trace!("Reporting primary device attributes");
                 let text = String::from("\x1b[?62;4;6;22c");
                 self.event_proxy
-                    .send_event(RioEvent::PtyWrite(text), self.window_id);
+                    .send_event(RioEvent::PtyWrite(self.route_id, text), self.window_id);
             }
             Some('>') => {
                 trace!("Reporting secondary device attributes");
                 let version = version_number(env!("CARGO_PKG_VERSION"));
                 let text = format!("\x1b[>0;{version};1c");
                 self.event_proxy
-                    .send_event(RioEvent::PtyWrite(text), self.window_id);
+                    .send_event(RioEvent::PtyWrite(self.route_id, text), self.window_id);
             }
             _ => debug!("Unsupported device attributes intermediate"),
         }
@@ -2624,7 +2630,7 @@ impl<U: EventListener> Handler for Crosswords<U> {
         let version = env!("CARGO_PKG_VERSION");
         let text = format!("\x1bP>|Rio {version}\x1b\\");
         self.event_proxy
-            .send_event(RioEvent::PtyWrite(text), self.window_id);
+            .send_event(RioEvent::PtyWrite(self.route_id, text), self.window_id);
     }
 
     #[inline]
@@ -2632,7 +2638,7 @@ impl<U: EventListener> Handler for Crosswords<U> {
         let current_mode = self.keyboard_mode_stack[self.keyboard_mode_idx];
         let text = format!("\x1b[?{current_mode}u");
         self.event_proxy
-            .send_event(RioEvent::PtyWrite(text), self.window_id);
+            .send_event(RioEvent::PtyWrite(self.route_id, text), self.window_id);
     }
 
     #[inline]
@@ -2688,13 +2694,13 @@ impl<U: EventListener> Handler for Crosswords<U> {
             5 => {
                 let text = String::from("\x1b[0n");
                 self.event_proxy
-                    .send_event(RioEvent::PtyWrite(text), self.window_id);
+                    .send_event(RioEvent::PtyWrite(self.route_id, text), self.window_id);
             }
             6 => {
                 let pos = self.grid.cursor.pos;
                 let text = format!("\x1b[{};{}R", pos.row + 1, pos.col + 1);
                 self.event_proxy
-                    .send_event(RioEvent::PtyWrite(text), self.window_id);
+                    .send_event(RioEvent::PtyWrite(self.route_id, text), self.window_id);
             }
             _ => debug!("unknown device status query: {}", arg),
         };
@@ -3112,7 +3118,7 @@ impl<U: EventListener> Handler for Crosswords<U> {
         );
         debug!("cells_size_pixels {:?}", text);
         self.event_proxy
-            .send_event(RioEvent::PtyWrite(text), self.window_id);
+            .send_event(RioEvent::PtyWrite(self.route_id, text), self.window_id);
     }
 
     #[inline]
@@ -3124,7 +3130,7 @@ impl<U: EventListener> Handler for Crosswords<U> {
         );
         debug!("text_area_size_chars {:?}", text);
         self.event_proxy
-            .send_event(RioEvent::PtyWrite(text), self.window_id);
+            .send_event(RioEvent::PtyWrite(self.route_id, text), self.window_id);
     }
 
     #[inline]
@@ -3222,7 +3228,7 @@ impl<U: EventListener> Handler for Crosswords<U> {
         };
 
         self.event_proxy.send_event(
-            RioEvent::PtyWrite(generate_response(pi, ps, pv)),
+            RioEvent::PtyWrite(self.route_id, generate_response(pi, ps, pv)),
             self.window_id,
         );
     }
@@ -3819,13 +3825,13 @@ impl<U: EventListener> Handler for Crosswords<U> {
     fn kitty_graphics_response(&mut self, response: String) {
         // Send response back to the terminal
         self.event_proxy
-            .send_event(RioEvent::PtyWrite(response), self.window_id);
+            .send_event(RioEvent::PtyWrite(self.route_id, response), self.window_id);
     }
 
     #[inline]
     fn xtgettcap_response(&mut self, response: String) {
         self.event_proxy
-            .send_event(RioEvent::PtyWrite(response), self.window_id);
+            .send_event(RioEvent::PtyWrite(self.route_id, response), self.window_id);
     }
 
     #[inline]
@@ -5326,7 +5332,8 @@ mod tests {
 
         // Verify the event is PtyWrite with the correct format
         match &captured_events[0] {
-            RioEvent::PtyWrite(text) => {
+            RioEvent::PtyWrite(route_id, text) => {
+                assert_eq!(*route_id, 0);
                 // Expected format: DCS > | Rio {version} ST
                 // DCS = \x1bP, ST = \x1b\\
                 assert!(
@@ -5342,6 +5349,56 @@ mod tests {
                     text, &expected,
                     "XTVERSION response should match expected format"
                 );
+            }
+            other => panic!("Expected PtyWrite event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_primary_device_attributes_report_uses_origin_route() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        #[derive(Clone)]
+        struct TestListener {
+            events: Rc<RefCell<Vec<RioEvent>>>,
+        }
+
+        impl EventListener for TestListener {
+            fn event(&self) -> (Option<RioEvent>, bool) {
+                (None, false)
+            }
+
+            fn send_event(&self, event: RioEvent, _id: WindowId) {
+                self.events.borrow_mut().push(event);
+            }
+        }
+
+        let size = CrosswordsSize::new(10, 10);
+        let window_id = WindowId::from(0);
+        let route_id = 7;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let listener = TestListener {
+            events: events.clone(),
+        };
+        let mut term = Crosswords::new(
+            size,
+            CursorShape::Block,
+            listener,
+            window_id,
+            route_id,
+            10_000,
+        );
+
+        Handler::identify_terminal(&mut term, None);
+
+        let captured_events = events.borrow();
+        assert_eq!(captured_events.len(), 1, "Should have sent one event");
+
+        match &captured_events[0] {
+            RioEvent::PtyWrite(event_route_id, text) => {
+                assert_eq!(*event_route_id, route_id);
+                assert_eq!(text, "\x1b[?62;4;6;22c");
             }
             other => panic!("Expected PtyWrite event, got {:?}", other),
         }

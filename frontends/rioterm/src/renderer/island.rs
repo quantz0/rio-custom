@@ -523,20 +523,31 @@ impl Island {
     }
 
     /// Toggle the color picker for a given tab index
-    pub fn toggle_color_picker(&mut self, tab_index: usize, current_title: &str) {
+    pub fn toggle_color_picker<T: rio_backend::event::EventListener>(
+        &mut self,
+        context_manager: &ContextManager<T>,
+        tab_index: usize,
+    ) {
         if self.color_picker_tab == Some(tab_index) {
             self.apply_rename();
             self.color_picker_tab = None;
         } else {
-            self.color_picker_tab = Some(tab_index);
-            // Initialize rename input with custom title or current displayed title
-            self.rename_input = self
-                .tab_custom_titles
-                .get(&tab_index)
-                .cloned()
-                .unwrap_or_else(|| current_title.to_string());
-            self.rename_caret_time = Instant::now();
+            self.open_picker_for_tab(context_manager, tab_index);
         }
+    }
+
+    /// Open the rename input for a tab without toggling it back off when the
+    /// same action is invoked repeatedly from the keyboard.
+    pub fn open_rename_for_tab<T: rio_backend::event::EventListener>(
+        &mut self,
+        context_manager: &ContextManager<T>,
+        tab_index: usize,
+    ) {
+        if self.color_picker_tab == Some(tab_index) {
+            return;
+        }
+
+        self.open_picker_for_tab(context_manager, tab_index);
     }
 
     /// Close the color picker, applying any pending rename
@@ -601,6 +612,43 @@ impl Island {
             }
         }
         true
+    }
+
+    pub fn handle_tab_closed(&mut self, removed_index: usize) {
+        Self::shift_entries_after_removal(&mut self.tab_colors, removed_index);
+        Self::shift_entries_after_removal(&mut self.tab_custom_titles, removed_index);
+
+        self.color_picker_tab = match self.color_picker_tab {
+            Some(tab_index) if tab_index == removed_index => None,
+            Some(tab_index) if tab_index > removed_index => Some(tab_index - 1),
+            other => other,
+        };
+    }
+
+    pub fn handle_tabs_swapped(&mut self, first_index: usize, second_index: usize) {
+        if first_index == second_index {
+            return;
+        }
+
+        Self::swap_entries(&mut self.tab_colors, first_index, second_index);
+        Self::swap_entries(&mut self.tab_custom_titles, first_index, second_index);
+
+        self.color_picker_tab = match self.color_picker_tab {
+            Some(tab_index) if tab_index == first_index => Some(second_index),
+            Some(tab_index) if tab_index == second_index => Some(first_index),
+            other => other,
+        };
+    }
+
+    pub fn handle_close_unfocused_tabs(&mut self, retained_index: usize) {
+        self.tab_colors = Self::retain_single_entry(&mut self.tab_colors, retained_index);
+        self.tab_custom_titles =
+            Self::retain_single_entry(&mut self.tab_custom_titles, retained_index);
+
+        self.color_picker_tab = match self.color_picker_tab {
+            Some(tab_index) if tab_index == retained_index => Some(0),
+            _ => None,
+        };
     }
 
     /// Check if the picker needs continuous redraw (caret blink)
@@ -881,10 +929,71 @@ impl Island {
         self.color_picker_tab.is_some()
     }
 
+    fn open_picker_for_tab<T: rio_backend::event::EventListener>(
+        &mut self,
+        context_manager: &ContextManager<T>,
+        tab_index: usize,
+    ) {
+        self.color_picker_tab = Some(tab_index);
+        self.rename_input = self.get_title_for_tab(context_manager, tab_index);
+        self.rename_caret_time = Instant::now();
+    }
+
+    fn shift_entries_after_removal<V>(
+        entries: &mut FxHashMap<usize, V>,
+        removed_index: usize,
+    ) {
+        let mut remapped = FxHashMap::default();
+        for (index, value) in entries.drain() {
+            if index == removed_index {
+                continue;
+            }
+
+            let target_index = if index > removed_index {
+                index - 1
+            } else {
+                index
+            };
+            remapped.insert(target_index, value);
+        }
+
+        *entries = remapped;
+    }
+
+    fn swap_entries<V>(
+        entries: &mut FxHashMap<usize, V>,
+        first_index: usize,
+        second_index: usize,
+    ) {
+        let first_entry = entries.remove(&first_index);
+        let second_entry = entries.remove(&second_index);
+
+        if let Some(value) = first_entry {
+            entries.insert(second_index, value);
+        }
+
+        if let Some(value) = second_entry {
+            entries.insert(first_index, value);
+        }
+    }
+
+    fn retain_single_entry<V>(
+        entries: &mut FxHashMap<usize, V>,
+        retained_index: usize,
+    ) -> FxHashMap<usize, V> {
+        let mut retained = FxHashMap::default();
+
+        if let Some(value) = entries.remove(&retained_index) {
+            retained.insert(0, value);
+        }
+
+        retained
+    }
+
     /// Get the title text for a specific tab index
-    fn get_title_for_tab(
+    fn get_title_for_tab<T: rio_backend::event::EventListener>(
         &self,
-        context_manager: &ContextManager<EventProxy>,
+        context_manager: &ContextManager<T>,
         tab_index: usize,
     ) -> String {
         // Custom user-set title takes priority
@@ -948,6 +1057,66 @@ mod tests {
             false,
         );
         assert_eq!(island.height(), ISLAND_HEIGHT);
+    }
+
+    #[test]
+    fn close_tab_reindexes_custom_titles_and_picker() {
+        let mut island = test_island();
+        island.tab_custom_titles.insert(1, String::from("middle"));
+        island.tab_custom_titles.insert(2, String::from("last"));
+        island.tab_colors.insert(2, [0.1, 0.2, 0.3, 1.0]);
+        island.color_picker_tab = Some(2);
+
+        island.handle_tab_closed(1);
+
+        assert_eq!(
+            island.tab_custom_titles.get(&1),
+            Some(&String::from("last"))
+        );
+        assert!(!island.tab_custom_titles.contains_key(&2));
+        assert_eq!(island.tab_colors.get(&1), Some(&[0.1, 0.2, 0.3, 1.0]));
+        assert_eq!(island.color_picker_tab, Some(1));
+    }
+
+    #[test]
+    fn swap_tabs_keeps_custom_title_with_tab() {
+        let mut island = test_island();
+        island.tab_custom_titles.insert(0, String::from("left"));
+        island.tab_custom_titles.insert(2, String::from("right"));
+        island.color_picker_tab = Some(0);
+
+        island.handle_tabs_swapped(0, 2);
+
+        assert_eq!(
+            island.tab_custom_titles.get(&0),
+            Some(&String::from("right"))
+        );
+        assert_eq!(
+            island.tab_custom_titles.get(&2),
+            Some(&String::from("left"))
+        );
+        assert_eq!(island.color_picker_tab, Some(2));
+    }
+
+    #[test]
+    fn close_unfocused_tabs_keeps_current_custom_title() {
+        let mut island = test_island();
+        island.tab_custom_titles.insert(0, String::from("first"));
+        island.tab_custom_titles.insert(2, String::from("current"));
+        island.tab_colors.insert(2, [0.4, 0.5, 0.6, 1.0]);
+        island.color_picker_tab = Some(2);
+
+        island.handle_close_unfocused_tabs(2);
+
+        assert_eq!(
+            island.tab_custom_titles,
+            FxHashMap::from_iter([(0, String::from("current"))])
+        );
+        assert_eq!(
+            island.tab_colors,
+            FxHashMap::from_iter([(0, [0.4, 0.5, 0.6, 1.0])])
+        );
+        assert_eq!(island.color_picker_tab, Some(0));
     }
 
     fn test_island() -> Island {

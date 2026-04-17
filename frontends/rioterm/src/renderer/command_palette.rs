@@ -61,6 +61,8 @@ pub enum PaletteAction {
     TabCreate,
     TabClose,
     TabCloseUnfocused,
+    MoveCurrentTabToPrev,
+    MoveCurrentTabToNext,
     SelectNextTab,
     SelectPrevTab,
     SplitRight,
@@ -110,6 +112,16 @@ const COMMANDS: &[Command] = &[
         title: "Close Other Tabs",
         shortcut: "",
         action: PaletteAction::TabCloseUnfocused,
+    },
+    Command {
+        title: "Move Current Tab To Prev",
+        shortcut: "",
+        action: PaletteAction::MoveCurrentTabToPrev,
+    },
+    Command {
+        title: "Move Current Tab To Next",
+        shortcut: "",
+        action: PaletteAction::MoveCurrentTabToNext,
     },
     Command {
         title: "Next Tab",
@@ -1290,6 +1302,20 @@ mod tests {
         assert_eq!(
             palette.get_selected_action(),
             Some(PaletteAction::ListFonts)
+        );
+    }
+
+    #[test]
+    fn move_current_tab_prev_command_is_present_and_actionable() {
+        let mut palette = CommandPalette::new();
+        palette.set_query("move current tab to prev".to_string());
+        let filtered = palette.filtered_rows();
+        assert!(!filtered.is_empty());
+        assert_eq!(filtered[0].1.title(), "Move Current Tab To Prev");
+        palette.selected_index = 0;
+        assert_eq!(
+            palette.get_selected_action(),
+            Some(PaletteAction::MoveCurrentTabToPrev)
         );
     }
 }

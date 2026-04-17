@@ -130,8 +130,8 @@ pub enum RioEvent {
         Arc<dyn Fn(ColorRgb) -> String + Sync + Send + 'static>,
     ),
 
-    /// Write some text to the PTY.
-    PtyWrite(String),
+    /// Write some text to the PTY for a specific route.
+    PtyWrite(usize, String),
 
     /// Request to write the text area size.
     TextAreaSizeRequest(Arc<dyn Fn(WinsizeBuilder) -> String + Sync + Send + 'static>),
@@ -189,7 +189,9 @@ impl Debug for RioEvent {
             RioEvent::ClipboardLoad(ty, _) => write!(f, "ClipboardLoad({ty:?})"),
             RioEvent::TextAreaSizeRequest(_) => write!(f, "TextAreaSizeRequest"),
             RioEvent::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
-            RioEvent::PtyWrite(text) => write!(f, "PtyWrite({text})"),
+            RioEvent::PtyWrite(route_id, text) => {
+                write!(f, "PtyWrite({route_id}, {text})")
+            }
             RioEvent::Title(title) => write!(f, "Title({title})"),
             RioEvent::TitleWithSubtitle(title, subtitle) => {
                 write!(f, "TitleWithSubtitle({title}, {subtitle})")
