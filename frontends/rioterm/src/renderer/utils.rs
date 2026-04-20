@@ -99,8 +99,13 @@ pub fn padding_top_from_config(
 
 #[inline]
 pub fn terminal_dimensions(layout: &ContextDimension) -> teletypewriter::WinsizeBuilder {
-    let width = layout.width - layout.margin.left - layout.margin.right;
-    let height = layout.height - layout.margin.top - layout.margin.bottom;
+    let scale = layout.dimension.scale;
+    let width = (layout.width - layout.margin.left * scale - layout.margin.right * scale)
+        .max(0.0);
+    let height =
+        (layout.height - layout.margin.top * scale - layout.margin.bottom * scale)
+            .max(0.0);
+
     teletypewriter::WinsizeBuilder {
         width: width as u16,
         height: height as u16,

@@ -1023,6 +1023,232 @@ fn test_select_split_down_respects_panel_margins_without_explicit_gap() {
 }
 
 #[test]
+fn test_split_right_terminal_columns_use_panel_content_width() {
+    let text_dimensions = TextDimensions {
+        width: 10.0,
+        height: 20.0,
+        scale: 1.0,
+    };
+    let dimension =
+        ContextDimension::build(120.0, 100.0, text_dimensions, 1.0, Margin::all(0.0));
+    let panel_config = rio_backend::config::layout::Panel {
+        margin: Margin::all(0.0),
+        padding: Margin::all(5.0),
+        row_gap: 0.0,
+        column_gap: 0.0,
+        border_width: 2.0,
+        border_radius: 0.0,
+    };
+    let mut grid = ContextGrid::new(
+        create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
+        Margin::all(0.0),
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+        panel_config,
+    );
+
+    let left = grid.current;
+    let right = grid.try_split_right().unwrap();
+    grid.inner.insert(
+        right,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            2,
+            2,
+            dimension,
+        )),
+    );
+    grid.calculate_positions();
+
+    let left_item = grid.inner.get(&left).unwrap();
+    assert_eq!(left_item.layout_rect, [0.0, 0.0, 60.0, 100.0]);
+    assert_eq!(left_item.terminal_rect, [5.0, 5.0, 50.0, 90.0]);
+
+    grid.apply_taffy_layout_for_tests();
+
+    let left_item = grid.inner.get(&left).unwrap();
+    let right_item = grid.inner.get(&right).unwrap();
+    assert_eq!(left_item.val.dimension.columns, 5);
+    assert_eq!(right_item.val.dimension.columns, 5);
+    assert_eq!(left_item.val.dimension.width, left_item.terminal_rect[2]);
+    assert_eq!(right_item.val.dimension.width, right_item.terminal_rect[2]);
+}
+
+#[test]
+fn test_split_down_terminal_rows_use_panel_content_height() {
+    let text_dimensions = TextDimensions {
+        width: 10.0,
+        height: 20.0,
+        scale: 1.0,
+    };
+    let dimension =
+        ContextDimension::build(120.0, 100.0, text_dimensions, 1.0, Margin::all(0.0));
+    let panel_config = rio_backend::config::layout::Panel {
+        margin: Margin::all(0.0),
+        padding: Margin::all(5.0),
+        row_gap: 0.0,
+        column_gap: 0.0,
+        border_width: 2.0,
+        border_radius: 0.0,
+    };
+    let mut grid = ContextGrid::new(
+        create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
+        Margin::all(0.0),
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+        panel_config,
+    );
+
+    let top = grid.current;
+    let bottom = grid.try_split_down().unwrap();
+    grid.inner.insert(
+        bottom,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            2,
+            2,
+            dimension,
+        )),
+    );
+    grid.calculate_positions();
+
+    let top_item = grid.inner.get(&top).unwrap();
+    assert_eq!(top_item.layout_rect, [0.0, 0.0, 120.0, 50.0]);
+    assert_eq!(top_item.terminal_rect, [5.0, 5.0, 110.0, 40.0]);
+
+    grid.apply_taffy_layout_for_tests();
+
+    let top_item = grid.inner.get(&top).unwrap();
+    let bottom_item = grid.inner.get(&bottom).unwrap();
+    assert_eq!(top_item.val.dimension.lines, 2);
+    assert_eq!(bottom_item.val.dimension.lines, 2);
+    assert_eq!(top_item.val.dimension.height, top_item.terminal_rect[3]);
+    assert_eq!(
+        bottom_item.val.dimension.height,
+        bottom_item.terminal_rect[3]
+    );
+}
+
+#[test]
+fn test_update_panel_config_refreshes_existing_split_layout() {
+    let text_dimensions = TextDimensions {
+        width: 10.0,
+        height: 20.0,
+        scale: 1.0,
+    };
+    let dimension =
+        ContextDimension::build(120.0, 100.0, text_dimensions, 1.0, Margin::all(0.0));
+    let mut grid = ContextGrid::new(
+        create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
+        Margin::all(0.0),
+        [0.1, 0.1, 0.1, 1.0],
+        [0.9, 0.9, 0.9, 1.0],
+        rio_backend::config::layout::Panel {
+            margin: Margin::all(0.0),
+            padding: Margin::all(0.0),
+            row_gap: 0.0,
+            column_gap: 0.0,
+            border_width: 2.0,
+            border_radius: 0.0,
+        },
+    );
+
+    let left = grid.current;
+    let right = grid.try_split_right().unwrap();
+    grid.inner.insert(
+        right,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            2,
+            2,
+            dimension,
+        )),
+    );
+
+    assert!(grid.apply_taffy_layout_for_tests());
+    let left_item = grid.inner.get(&left).unwrap();
+    assert_eq!(left_item.terminal_rect, [0.0, 0.0, 60.0, 100.0]);
+
+    grid.update_panel_config(
+        rio_backend::config::layout::Panel {
+            margin: Margin::all(0.0),
+            padding: Margin::all(5.0),
+            row_gap: 0.0,
+            column_gap: 0.0,
+            border_width: 3.0,
+            border_radius: 0.0,
+        },
+        [0.2, 0.3, 0.4, 1.0],
+    );
+    assert!(grid.apply_taffy_layout_for_tests());
+
+    let left_item = grid.inner.get(&left).unwrap();
+    let right_item = grid.inner.get(&right).unwrap();
+    assert_eq!(left_item.terminal_rect, [5.0, 5.0, 50.0, 90.0]);
+    assert_eq!(right_item.terminal_rect, [65.0, 5.0, 50.0, 90.0]);
+    assert_eq!(left_item.val.dimension.columns, 5);
+    assert_eq!(right_item.val.dimension.columns, 5);
+    assert_eq!(grid.border_config.width, 3.0);
+    assert_eq!(grid.border_config.color, [0.2, 0.3, 0.4, 1.0]);
+}
+
+#[test]
+fn test_update_scale_refreshes_existing_split_spacing() {
+    let text_dimensions = TextDimensions {
+        width: 10.0,
+        height: 20.0,
+        scale: 1.0,
+    };
+    let dimension =
+        ContextDimension::build(120.0, 100.0, text_dimensions, 1.0, Margin::all(0.0));
+    let panel_config = rio_backend::config::layout::Panel {
+        margin: Margin::all(1.0),
+        padding: Margin::all(5.0),
+        row_gap: 0.0,
+        column_gap: 0.0,
+        border_width: 2.0,
+        border_radius: 0.0,
+    };
+    let mut grid = ContextGrid::new(
+        create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
+        Margin::all(0.0),
+        [0.1, 0.1, 0.1, 1.0],
+        [0.9, 0.9, 0.9, 1.0],
+        panel_config,
+    );
+
+    let left = grid.current;
+    let right = grid.try_split_right().unwrap();
+    grid.inner.insert(
+        right,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            2,
+            2,
+            dimension,
+        )),
+    );
+
+    assert!(grid.apply_taffy_layout_for_tests());
+    let left_item = grid.inner.get(&left).unwrap();
+    assert_eq!(left_item.terminal_rect, [6.0, 6.0, 48.0, 88.0]);
+
+    grid.update_scale(2.0);
+    assert!(grid.apply_taffy_layout_for_tests());
+
+    let left_item = grid.inner.get(&left).unwrap();
+    let right_item = grid.inner.get(&right).unwrap();
+    assert_eq!(left_item.terminal_rect, [12.0, 12.0, 36.0, 76.0]);
+    assert_eq!(right_item.terminal_rect, [72.0, 12.0, 36.0, 76.0]);
+    assert_eq!(left_item.val.dimension.width, left_item.terminal_rect[2]);
+    assert_eq!(right_item.val.dimension.height, right_item.terminal_rect[3]);
+}
+
+#[test]
 fn test_invalidate_visible_panels_for_full_redraw_marks_all_split_panels_dirty() {
     let text_dimensions = TextDimensions {
         width: 10.0,

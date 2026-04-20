@@ -216,6 +216,7 @@ pub struct ContextGridItem<T: EventListener> {
     pub val: Context<T>,
     rich_text_object: Object,
     pub layout_rect: [f32; 4],
+    pub terminal_rect: [f32; 4],
 }
 
 impl<T: rio_backend::event::EventListener> ContextGridItem<T> {
@@ -235,6 +236,7 @@ impl<T: rio_backend::event::EventListener> ContextGridItem<T> {
             val: context,
             rich_text_object,
             layout_rect: [0.0; 4],
+            terminal_rect: [0.0; 4],
         }
     }
 
@@ -416,6 +418,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
     /// O(n) where n is total nodes in tree.
     fn update_layout_rects(&mut self) {
         let mut stack: Vec<(NodeId, f32, f32)> = vec![(self.root_node, 0.0, 0.0)];
+        let use_content_box = self.visible_panel_count() > 1;
 
         while let Some((node, parent_x, parent_y)) = stack.pop() {
             let layout = match self.tree.layout(node) {
@@ -429,6 +432,16 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             // Update layout_rect if this node is a panel (exists in inner)
             if let Some(item) = self.inner.get_mut(&node) {
                 item.layout_rect = [abs_x, abs_y, layout.size.width, layout.size.height];
+                item.terminal_rect = if use_content_box {
+                    [
+                        parent_x + layout.content_box_x(),
+                        parent_y + layout.content_box_y(),
+                        layout.content_box_width().max(0.0),
+                        layout.content_box_height().max(0.0),
+                    ]
+                } else {
+                    item.layout_rect
+                };
             }
 
             // Add children to stack
@@ -1184,11 +1197,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         best.map(|(other_id, _, _, _, _)| other_id)
     }
 
-    fn apply_taffy_layout(&mut self, sugarloaf: &mut Sugarloaf) -> bool {
-        if self.compute_layout().is_err() {
-            return false;
-        }
-
+    fn resize_visible_terminals_to_layout(&mut self) {
         let visible_nodes: FxHashMap<NodeId, bool> = self
             .inner
             .keys()
@@ -1203,8 +1212,8 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
             // Clear margin since Taffy layout already accounts for spacing
             item.val.dimension.margin = Margin::all(0.0);
-            item.val.dimension.update_width(item.layout_rect[2]);
-            item.val.dimension.update_height(item.layout_rect[3]);
+            item.val.dimension.update_width(item.terminal_rect[2]);
+            item.val.dimension.update_height(item.terminal_rect[3]);
 
             // Update terminal size
             let mut terminal = item.val.terminal.lock();
@@ -1215,9 +1224,27 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
                 crate::renderer::utils::terminal_dimensions(&item.val.dimension);
             let _ = item.val.messenger.send_resize(winsize);
         }
+    }
+
+    fn apply_taffy_layout(&mut self, sugarloaf: &mut Sugarloaf) -> bool {
+        if self.compute_layout().is_err() {
+            return false;
+        }
+
+        self.resize_visible_terminals_to_layout();
 
         self.invalidate_visible_panels_for_full_redraw();
         self.sync_rich_text_layout_state(sugarloaf);
+        true
+    }
+
+    #[cfg(test)]
+    fn apply_taffy_layout_for_tests(&mut self) -> bool {
+        if self.compute_layout().is_err() {
+            return false;
+        }
+
+        self.resize_visible_terminals_to_layout();
         true
     }
 
@@ -1272,7 +1299,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
                 continue;
             }
 
-            let [abs_x, abs_y, width, height] = item.layout_rect;
+            let [abs_x, abs_y, width, height] = item.terminal_rect;
             let x = (abs_x + self.scaled_margin.left) / scale;
             let y = (abs_y + self.scaled_margin.top) / scale;
 
@@ -1448,7 +1475,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             // absolute offset so that mouse coordinates (which are relative
             // to the window) are correctly translated to panel-local grid
             // positions.
-            let [abs_x, abs_y, _, _] = current_item.layout_rect;
+            let [abs_x, abs_y, _, _] = current_item.terminal_rect;
             let margin = Margin {
                 left: self.scaled_margin.left + abs_x,
                 top: self.scaled_margin.top + abs_y,
@@ -1600,6 +1627,55 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         self.scaled_margin = scaled_margin;
     }
 
+    pub fn update_scale(&mut self, scale: f32) {
+        self.scale = scale;
+        self.update_panel_config(self.panel_config, self.border_config.color);
+    }
+
+    pub fn update_panel_config(
+        &mut self,
+        panel_config: rio_backend::config::layout::Panel,
+        border_color: [f32; 4],
+    ) {
+        self.panel_config = panel_config;
+        self.border_config = BorderConfig {
+            width: panel_config.border_width,
+            color: border_color,
+        };
+
+        let panel_gap = geometry::Size {
+            width: length(panel_config.column_gap * self.scale),
+            height: length(panel_config.row_gap * self.scale),
+        };
+        let panel_padding = geometry::Rect {
+            left: length(panel_config.padding.left * self.scale),
+            right: length(panel_config.padding.right * self.scale),
+            top: length(panel_config.padding.top * self.scale),
+            bottom: length(panel_config.padding.bottom * self.scale),
+        };
+        let panel_margin = geometry::Rect {
+            left: length(panel_config.margin.left * self.scale),
+            right: length(panel_config.margin.right * self.scale),
+            top: length(panel_config.margin.top * self.scale),
+            bottom: length(panel_config.margin.bottom * self.scale),
+        };
+
+        for node in collect_tree_nodes(&self.tree, self.root_node) {
+            let Ok(mut style) = self.tree.style(node).cloned() else {
+                continue;
+            };
+
+            if self.inner.contains_key(&node) {
+                style.padding = panel_padding;
+                style.margin = panel_margin;
+            } else {
+                style.gap = panel_gap;
+            }
+
+            let _ = self.tree.set_style(node, style);
+        }
+    }
+
     pub fn update_line_height(&mut self, line_height: f32) {
         for context in self.inner.values_mut() {
             context.val.dimension.update_line_height(line_height);
@@ -1642,8 +1718,8 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
         // Update positions from layout_rect for all panels
         for item in self.inner.values_mut() {
-            let x = item.layout_rect[0] + self.scaled_margin.left;
-            let y = item.layout_rect[1] + self.scaled_margin.top;
+            let x = item.terminal_rect[0] + self.scaled_margin.left;
+            let y = item.terminal_rect[1] + self.scaled_margin.top;
             item.set_position([x, y]);
         }
     }

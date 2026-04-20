@@ -2039,6 +2039,7 @@ impl<U: EventListener> Handler for Crosswords<U> {
         let terminator = terminator.to_owned();
         self.event_proxy.send_event(
             RioEvent::ColorRequest(
+                self.route_id,
                 index,
                 Arc::new(move |color| {
                     format!(
@@ -5405,6 +5406,60 @@ mod tests {
                 assert_eq!(text, "\x1b[?62;4;6;22c");
             }
             other => panic!("Expected PtyWrite event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_dynamic_color_query_uses_origin_route() {
+        use crate::performer::handler::{Processor, StdSyncHandler};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        #[derive(Clone)]
+        struct TestListener {
+            events: Rc<RefCell<Vec<RioEvent>>>,
+        }
+
+        impl EventListener for TestListener {
+            fn event(&self) -> (Option<RioEvent>, bool) {
+                (None, false)
+            }
+
+            fn send_event(&self, event: RioEvent, _id: WindowId) {
+                self.events.borrow_mut().push(event);
+            }
+        }
+
+        let size = CrosswordsSize::new(10, 10);
+        let window_id = WindowId::from(0);
+        let route_id = 7;
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let listener = TestListener {
+            events: events.clone(),
+        };
+        let mut term = Crosswords::new(
+            size,
+            CursorShape::Block,
+            listener,
+            window_id,
+            route_id,
+            10_000,
+        );
+        let mut processor = Processor::<StdSyncHandler>::new();
+
+        processor.advance(&mut term, b"\x1b]10;?\x07");
+
+        let captured_events = events.borrow();
+        assert_eq!(captured_events.len(), 1, "Should have sent one event");
+
+        match &captured_events[0] {
+            RioEvent::ColorRequest(event_route_id, index, format) => {
+                assert_eq!(*event_route_id, route_id);
+                assert_eq!(*index, NamedColor::Foreground as usize);
+                let response = format(ColorRgb::new(0xff, 0xff, 0xff));
+                assert_eq!(response, "\x1b]10;rgb:ffff/ffff/ffff\x1b\\");
+            }
+            other => panic!("Expected ColorRequest event, got {:?}", other),
         }
     }
 

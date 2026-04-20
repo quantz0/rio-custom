@@ -428,6 +428,7 @@ impl Screen<'_> {
         let scale = self.sugarloaf.scale_factor();
         for context_grid in self.context_manager.contexts_mut() {
             context_grid.update_line_height(config.line_height);
+            context_grid.update_panel_config(config.panel, config.colors.split);
 
             context_grid.update_scaled_margin(Margin::new(
                 padding_y_top * scale,
@@ -465,8 +466,14 @@ impl Screen<'_> {
         self.mouse
             .set_multiplier_and_divider(config.scroll.multiplier, config.scroll.divider);
 
-        // Update keyboard config in context manager
+        // Update configs used by existing grids and by future tabs/splits.
         self.context_manager.config.keyboard = config.keyboard;
+        self.context_manager.config.panel = config.panel;
+        self.context_manager.config.split_color = config.colors.split;
+        self.context_manager.config.split_active_color = config.colors.split_active;
+        self.context_manager.config.title = config.title.clone();
+        self.context_manager.config.scrollback_history_limit =
+            config.scrollback_history_limit;
 
         self.sugarloaf
             .set_background_color(Some(self.renderer.dynamic_background.1));
@@ -539,11 +546,29 @@ impl Screen<'_> {
     ) -> &mut Self {
         self.sugarloaf.rescale(new_scale);
         self.sugarloaf.resize(new_size.width, new_size.height);
-        self.render();
-        self.resize_all_contexts();
-        self.context_manager
-            .current_grid_mut()
-            .update_dimensions(&mut self.sugarloaf);
+
+        for context_grid in self.context_manager.contexts_mut() {
+            let margin = context_grid.get_scaled_margin();
+            let old_scale = if context_grid.current().dimension.dimension.scale > 0.0 {
+                context_grid.current().dimension.dimension.scale
+            } else {
+                new_scale
+            };
+            let scale_ratio = if old_scale > 0.0 {
+                new_scale / old_scale
+            } else {
+                1.0
+            };
+            context_grid.update_scale(new_scale);
+            context_grid.update_scaled_margin(Margin::new(
+                margin.top * scale_ratio,
+                margin.right * scale_ratio,
+                margin.bottom * scale_ratio,
+                margin.left * scale_ratio,
+            ));
+            context_grid.update_dimensions(&mut self.sugarloaf);
+        }
+
         let width = new_size.width as f32;
         let height = new_size.height as f32;
 
@@ -2343,7 +2368,7 @@ impl Screen<'_> {
             x,
             margin.left,
             layout.dimension.width,
-            layout.width,
+            margin.left + layout.width,
         )
     }
 
@@ -2519,7 +2544,7 @@ impl Screen<'_> {
             None => return false,
         };
 
-        let panel_rect = item.layout_rect;
+        let panel_rect = item.terminal_rect;
         let rich_text_id = item.context().rich_text_id;
 
         let terminal = item.context().terminal.lock();
@@ -2600,7 +2625,7 @@ impl Screen<'_> {
             None => return false,
         };
 
-        let panel_rect = item.layout_rect;
+        let panel_rect = item.terminal_rect;
 
         let terminal = item.context().terminal.lock();
         let display_offset = terminal.display_offset();
@@ -3506,7 +3531,7 @@ impl Screen<'_> {
                 let cell_height = physical_cell_height(&layout);
                 let scale_factor = self.sugarloaf.scale_factor();
 
-                let panel_rect = current_item.layout_rect;
+                let panel_rect = current_item.terminal_rect;
                 let origin_x = panel_rect[0] + scaled_margin.left;
                 let origin_y = panel_rect[1] + scaled_margin.top;
 
@@ -3604,9 +3629,9 @@ impl Screen<'_> {
             return;
         }
 
-        // Panel origin: layout_rect is relative to root container,
+        // Panel origin: terminal_rect is relative to root container,
         // add scaled_margin to get absolute screen position
-        let panel_rect = current_item.layout_rect;
+        let panel_rect = current_item.terminal_rect;
         let origin_x = panel_rect[0] + scaled_margin.left;
         let origin_y = panel_rect[1] + scaled_margin.top;
 

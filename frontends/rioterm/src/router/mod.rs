@@ -164,7 +164,11 @@ impl Route<'_> {
         // Handle island color picker / rename input
         if let Some(ref mut island) = self.window.screen.renderer.island {
             if island.is_color_picker_open() {
-                let consumed = island.handle_rename_input(key_event);
+                let consumed = island.handle_rename_input(
+                    key_event,
+                    self.window.screen.modifiers.state(),
+                    clipboard,
+                );
                 if consumed {
                     self.window.screen.render();
                     return true;

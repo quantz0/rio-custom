@@ -8,8 +8,11 @@
 
 use crate::context::{next_rich_text_id, ContextManager};
 use crate::renderer::utils::add_span_with_fallback;
+use rio_backend::clipboard::{Clipboard, ClipboardType};
 use rio_backend::event::{EventProxy, ProgressReport, ProgressState};
 use rio_backend::sugarloaf::{Attributes, SpanStyle, Sugarloaf};
+use rio_window::keyboard::ModifiersState;
+use rio_window::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use rustc_hash::FxHashMap;
 use std::borrow::Cow;
 use std::time::Instant;
@@ -158,6 +161,8 @@ pub struct Island {
     tab_custom_titles: FxHashMap<usize, String>,
     /// Current rename input text while picker is open
     rename_input: String,
+    /// Whether the current rename input is fully selected.
+    rename_selection_all: bool,
     /// Rich text ID for the rename input
     rename_text_id: Option<usize>,
     /// Caret blink timer
@@ -189,6 +194,7 @@ impl Island {
             tab_colors: FxHashMap::default(),
             tab_custom_titles: FxHashMap::default(),
             rename_input: String::new(),
+            rename_selection_all: false,
             rename_text_id: None,
             rename_caret_time: Instant::now(),
         }
@@ -575,6 +581,8 @@ impl Island {
     pub fn handle_rename_input(
         &mut self,
         key_event: &rio_window::event::KeyEvent,
+        modifiers: ModifiersState,
+        clipboard: &mut Clipboard,
     ) -> bool {
         use rio_window::event::ElementState;
         use rio_window::keyboard::{Key, NamedKey};
@@ -587,26 +595,53 @@ impl Island {
             return true; // consume release events too
         }
 
+        if rename_shortcut_modifiers(modifiers) {
+            match key_event.key_without_modifiers().as_ref() {
+                Key::Character("a") => {
+                    self.select_all_rename_input();
+                    return true;
+                }
+                Key::Character("c") => {
+                    if let Some(selected) = self.copy_selected_rename_text() {
+                        clipboard.set(ClipboardType::Clipboard, selected.to_owned());
+                    }
+                    return true;
+                }
+                Key::Character("x") => {
+                    if let Some(selected) = self.cut_selected_rename_text() {
+                        clipboard.set(ClipboardType::Clipboard, selected);
+                    }
+                    return true;
+                }
+                Key::Character("v") => {
+                    let pasted = clipboard.get(ClipboardType::Clipboard);
+                    self.insert_rename_text(&pasted);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+
         match &key_event.logical_key {
             Key::Named(NamedKey::Escape) => {
                 // Cancel — discard input, close picker
+                self.rename_selection_all = false;
                 self.color_picker_tab = None;
             }
             Key::Named(NamedKey::Enter) => {
                 // Confirm — apply rename and close
                 self.apply_rename();
+                self.rename_selection_all = false;
                 self.color_picker_tab = None;
             }
             Key::Named(NamedKey::Backspace) => {
-                self.rename_input.pop();
-                self.rename_caret_time = Instant::now();
+                self.backspace_rename_input();
             }
             _ => {
                 if let Some(text) = key_event.text.as_ref() {
                     let s = text.as_str();
                     if !s.is_empty() && s.chars().all(|c| !c.is_control()) {
-                        self.rename_input.push_str(s);
-                        self.rename_caret_time = Instant::now();
+                        self.insert_rename_text(s);
                     }
                 }
             }
@@ -720,6 +755,8 @@ impl Island {
         }
 
         // Clicked in picker area but not on a swatch
+        self.rename_selection_all = false;
+        self.rename_caret_time = Instant::now();
         true
     }
 
@@ -881,6 +918,32 @@ impl Island {
             chars[start..].iter().collect()
         };
 
+        let rendered_width = if self.rename_input.is_empty() {
+            0.0
+        } else {
+            display_text.chars().fold(0.0, |acc, c| {
+                acc + sugarloaf.char_advance(
+                    c,
+                    Attributes::default(),
+                    PICKER_INPUT_FONT_SIZE,
+                )
+            })
+        };
+
+        if self.rename_selection_all && !self.rename_input.is_empty() {
+            sugarloaf.rounded_rect(
+                None,
+                text_x - 1.0,
+                input_y + 4.0,
+                (rendered_width + 2.0).min(max_text_width + 2.0),
+                PICKER_INPUT_HEIGHT - 8.0,
+                [0.21, 0.45, 0.86, 1.0],
+                0.0,
+                2.0,
+                10,
+            );
+        }
+
         let content = sugarloaf.content();
         content
             .sel(text_id)
@@ -898,16 +961,10 @@ impl Island {
         sugarloaf.set_position(text_id, text_x, text_y);
         sugarloaf.set_visibility(text_id, true);
 
-        let rendered_width = if self.rename_input.is_empty() {
-            0.0
-        } else {
-            sugarloaf.get_text_rendered_width(&text_id)
-        };
-
         // Blinking caret
         let elapsed = self.rename_caret_time.elapsed().as_millis();
         let show_caret = (elapsed / 500).is_multiple_of(2);
-        if show_caret {
+        if show_caret && !self.rename_selection_all {
             let caret_x = text_x + rendered_width;
             if caret_x <= input_x + input_width {
                 sugarloaf.rect(
@@ -936,6 +993,53 @@ impl Island {
     ) {
         self.color_picker_tab = Some(tab_index);
         self.rename_input = self.get_title_for_tab(context_manager, tab_index);
+        self.rename_selection_all = false;
+        self.rename_caret_time = Instant::now();
+    }
+
+    fn select_all_rename_input(&mut self) {
+        self.rename_selection_all = !self.rename_input.is_empty();
+        self.rename_caret_time = Instant::now();
+    }
+
+    fn copy_selected_rename_text(&self) -> Option<&str> {
+        if self.rename_selection_all && !self.rename_input.is_empty() {
+            Some(self.rename_input.as_str())
+        } else {
+            None
+        }
+    }
+
+    fn cut_selected_rename_text(&mut self) -> Option<String> {
+        let selected = self.copy_selected_rename_text()?.to_owned();
+        self.rename_input.clear();
+        self.rename_selection_all = false;
+        self.rename_caret_time = Instant::now();
+        Some(selected)
+    }
+
+    fn insert_rename_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        if self.rename_selection_all {
+            self.rename_input.clear();
+            self.rename_selection_all = false;
+        }
+
+        self.rename_input.push_str(text);
+        self.rename_caret_time = Instant::now();
+    }
+
+    fn backspace_rename_input(&mut self) {
+        if self.rename_selection_all {
+            self.rename_input.clear();
+            self.rename_selection_all = false;
+        } else {
+            self.rename_input.pop();
+        }
+
         self.rename_caret_time = Instant::now();
     }
 
@@ -1317,6 +1421,52 @@ mod tests {
     }
 
     #[test]
+    fn rename_select_all_copy_cut_and_replace_selected_text() {
+        let mut island = test_island();
+        island.rename_input = "project".to_string();
+
+        island.select_all_rename_input();
+        assert_eq!(island.copy_selected_rename_text(), Some("project"));
+
+        let cut = island.cut_selected_rename_text();
+        assert_eq!(cut.as_deref(), Some("project"));
+        assert!(island.rename_input.is_empty());
+        assert!(!island.rename_selection_all);
+
+        island.rename_input = "draft".to_string();
+        island.select_all_rename_input();
+        island.insert_rename_text("final");
+        assert_eq!(island.rename_input, "final");
+        assert!(!island.rename_selection_all);
+    }
+
+    #[test]
+    fn rename_backspace_clears_selected_input() {
+        let mut island = test_island();
+        island.rename_input = "notes".to_string();
+        island.select_all_rename_input();
+
+        island.backspace_rename_input();
+
+        assert!(island.rename_input.is_empty());
+        assert!(!island.rename_selection_all);
+    }
+
+    #[test]
+    fn rename_copy_without_selection_and_empty_insert_are_noops() {
+        let mut island = test_island();
+        island.rename_input = "tab".to_string();
+
+        assert_eq!(island.copy_selected_rename_text(), None);
+
+        island.insert_rename_text("");
+        assert_eq!(island.rename_input, "tab");
+
+        island.backspace_rename_input();
+        assert_eq!(island.rename_input, "ta");
+    }
+
+    #[test]
     fn progress_remove_clears_all_progress_state() {
         let mut island = test_island();
         island.set_progress_report(ProgressReport {
@@ -1332,4 +1482,18 @@ mod tests {
         assert!(island.progress_started_at.is_none());
         assert!(island.progress_last_seen.is_none());
     }
+}
+
+#[inline]
+fn rename_shortcut_modifiers(modifiers: ModifiersState) -> bool {
+    if modifiers.control_key() {
+        return true;
+    }
+
+    #[cfg(target_os = "macos")]
+    if modifiers.super_key() {
+        return true;
+    }
+
+    false
 }

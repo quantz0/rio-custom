@@ -688,15 +688,16 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         .send_bytes(text.into_bytes());
                 }
             }
-            RioEventType::Rio(RioEvent::ColorRequest(index, format)) => {
+            RioEventType::Rio(RioEvent::ColorRequest(route_id, index, format)) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
-                    let terminal = route
-                        .window
-                        .screen
-                        .context_manager
-                        .current()
-                        .terminal
-                        .lock();
+                    let default_color = route.window.screen.renderer.colors[index];
+                    let Some(context) =
+                        route.window.screen.ctx_mut().get_by_route_id(route_id)
+                    else {
+                        return;
+                    };
+
+                    let terminal = context.context().terminal.lock();
                     let color: ColorRgb = match terminal.colors()[index] {
                         Some(color) => ColorRgb::from_color_arr(color),
                         // Ignore cursor color requests unless it was changed.
@@ -705,18 +706,13 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         {
                             return
                         }
-                        None => ColorRgb::from_color_arr(
-                            route.window.screen.renderer.colors[index],
-                        ),
+                        None => ColorRgb::from_color_arr(default_color),
                     };
 
                     drop(terminal);
 
-                    route
-                        .window
-                        .screen
-                        .ctx_mut()
-                        .current_mut()
+                    context
+                        .context_mut()
                         .messenger
                         .send_bytes(format(color).into_bytes());
                 }
@@ -1870,6 +1866,11 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
 
         // Use the modifiers passed from the menu action
         route.window.screen.set_modifiers(*modifiers);
+
+        if route.has_key_wait(key, &mut self.router.clipboard) {
+            route.window.screen.set_modifiers(original_modifiers);
+            return;
+        }
 
         // Process the key event
         route

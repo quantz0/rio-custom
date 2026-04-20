@@ -127,6 +127,7 @@ pub enum RioEvent {
     /// expected escape sequence format.
     ColorRequest(
         usize,
+        usize,
         Arc<dyn Fn(ColorRgb) -> String + Sync + Send + 'static>,
     ),
 
@@ -188,7 +189,9 @@ impl Debug for RioEvent {
             }
             RioEvent::ClipboardLoad(ty, _) => write!(f, "ClipboardLoad({ty:?})"),
             RioEvent::TextAreaSizeRequest(_) => write!(f, "TextAreaSizeRequest"),
-            RioEvent::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
+            RioEvent::ColorRequest(route_id, index, _) => {
+                write!(f, "ColorRequest({route_id}, {index})")
+            }
             RioEvent::PtyWrite(route_id, text) => {
                 write!(f, "PtyWrite({route_id}, {text})")
             }

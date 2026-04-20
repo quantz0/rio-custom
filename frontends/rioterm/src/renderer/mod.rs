@@ -971,7 +971,7 @@ impl Renderer {
         if self.scrollbar.is_enabled() {
             self.scrollbar.clear_panel_states();
             for grid_context in grid.contexts_mut().values() {
-                let panel_rect = grid_context.layout_rect;
+                let panel_rect = grid_context.terminal_rect;
                 let ctx = grid_context.context();
                 let terminal = ctx.terminal.lock();
                 self.scrollbar
@@ -987,7 +987,7 @@ impl Renderer {
 
         for (key, grid_context) in grid.contexts_mut().iter_mut() {
             let is_active = &active_key == key;
-            let panel_rect = grid_context.layout_rect;
+            let panel_rect = grid_context.terminal_rect;
             let context = grid_context.context_mut();
 
             let mut has_ime = false;

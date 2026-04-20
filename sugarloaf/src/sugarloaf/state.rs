@@ -287,8 +287,16 @@ impl SugarState {
     }
 
     #[inline]
-    pub fn set_text_line_height(&mut self, _rt_id: &usize, _line_height: f32) {
-        // Simplified - line height changes handled elsewhere
+    pub fn set_text_line_height(&mut self, rt_id: &usize, line_height: f32) {
+        if let Some(content_state) = self.content.states.get_mut(rt_id) {
+            if let Some(text_state) = content_state.as_text_mut() {
+                text_state.layout.line_height = line_height;
+                text_state.layout.dimensions.height = 0.0;
+                text_state.layout.dimensions.width = 0.0;
+            }
+            content_state.render_data.needs_repaint = true;
+        }
+        self.compute_dimensions();
     }
 
     #[inline]
@@ -306,5 +314,28 @@ impl SugarState {
         }
 
         self.compute_dimensions();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_text_line_height_updates_existing_text_dimensions() {
+        let font_library = FontLibrary::default();
+        let mut state =
+            SugarState::new(RootStyle::new(1.0, 18.0, 1.0), &font_library, &None);
+        let text_id = 7;
+        let layout = TextLayout::from_default_layout(&state.style);
+        state.content.set_text(text_id, &layout);
+
+        let before = state.get_text_dimensions(&text_id);
+        state.set_text_line_height(&text_id, 1.5);
+        let after = state.get_text_dimensions(&text_id);
+        let updated_layout = state.get_state_layout(&text_id);
+
+        assert_eq!(updated_layout.line_height, 1.5);
+        assert!(after.height > before.height);
     }
 }

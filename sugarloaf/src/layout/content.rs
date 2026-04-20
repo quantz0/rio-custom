@@ -568,13 +568,14 @@ impl Content {
         if let Some(mut font_library_data) = self.fonts.inner.try_write() {
             let font_id = 0; // FONT_ID_REGULAR
 
-            // Match the renderer's physical line-height calculation path so the
-            // computed viewport row count never exceeds what can actually be
-            // drawn after resize/fullscreen transitions.
+            // `get_font_metrics` already returns the ceiled terminal cell
+            // height via `Metrics::for_rich_text`. Keep viewport row
+            // calculation on that same grid so resize never allocates a row
+            // that rendering clips outside the panel.
             let line_height_physical = font_library_data
                 .get_font_metrics(&font_id, scaled_font_size)
                 .map(|(ascent, descent, leading)| {
-                    ((ascent + descent + leading) * layout.line_height).max(1.0)
+                    ((ascent + descent + leading).ceil() * layout.line_height).max(1.0)
                 })
                 .unwrap_or(fallback_height);
 
