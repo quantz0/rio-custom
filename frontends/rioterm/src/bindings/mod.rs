@@ -216,6 +216,7 @@ impl From<String> for Action {
             "paste" => Some(Action::Paste),
             "quit" => Some(Action::Quit),
             "copy" => Some(Action::Copy),
+            "copyorinterrupt" => Some(Action::CopyOrInterrupt),
             "searchforward" => Some(Action::SearchForward),
             "searchbackward" => Some(Action::SearchBackward),
             "searchconfirm" => Some(Action::Search(SearchAction::SearchConfirm)),
@@ -353,6 +354,9 @@ pub enum Action {
 
     /// Store current selection into clipboard.
     Copy,
+
+    /// Store current selection into clipboard, or send ETX when empty.
+    CopyOrInterrupt,
 
     #[cfg(not(any(target_os = "macos", windows)))]
     #[allow(dead_code)]
@@ -1104,6 +1108,7 @@ pub fn platform_key_bindings(
         KeyBinding;
         "v", ModifiersState::CONTROL | ModifiersState::SHIFT, ~BindingMode::VI; Action::Paste;
         "c", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::Copy;
+        "c", ModifiersState::CONTROL, ~BindingMode::SEARCH, ~BindingMode::VI; Action::CopyOrInterrupt;
         "c", ModifiersState::CONTROL | ModifiersState::SHIFT,
             +BindingMode::VI; Action::ClearSelection;
         Key::Named(Insert),   ModifiersState::SHIFT, ~BindingMode::VI; Action::PasteSelection;
@@ -1169,6 +1174,7 @@ pub fn platform_key_bindings(
         KeyBinding;
         "v", ModifiersState::CONTROL | ModifiersState::SHIFT, ~BindingMode::VI; Action::Paste;
         "c", ModifiersState::CONTROL | ModifiersState::SHIFT; Action::Copy;
+        "c", ModifiersState::CONTROL, ~BindingMode::SEARCH, ~BindingMode::VI; Action::CopyOrInterrupt;
         "c", ModifiersState::CONTROL | ModifiersState::SHIFT, +BindingMode::VI; Action::ClearSelection;
         Key::Named(Insert), ModifiersState::SHIFT, ~BindingMode::VI; Action::PasteSelection;
         "0", ModifiersState::CONTROL; Action::ResetFontSize;
@@ -1554,6 +1560,18 @@ mod tests {
     fn action_from_string_rename_tab() {
         assert_eq!(Action::from(String::from("renametab")), Action::RenameTab);
         assert_eq!(Action::from(String::from("RenameTab")), Action::RenameTab);
+    }
+
+    #[test]
+    fn action_from_string_copy_or_interrupt() {
+        assert_eq!(
+            Action::from(String::from("copyorinterrupt")),
+            Action::CopyOrInterrupt
+        );
+        assert_eq!(
+            Action::from(String::from("CopyOrInterrupt")),
+            Action::CopyOrInterrupt
+        );
     }
 
     #[test]

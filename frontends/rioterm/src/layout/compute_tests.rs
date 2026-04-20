@@ -1,6 +1,6 @@
 use super::*;
 use crate::context::create_dead_context;
-use rio_backend::event::{VoidListener, WindowId};
+use rio_backend::event::{TerminalDamage, VoidListener, WindowId};
 
 // This file tests compute function on different layouts.
 // I've added some real scenarios so I can make sure it doesn't go off again.
@@ -1020,4 +1020,48 @@ fn test_select_split_down_respects_panel_margins_without_explicit_gap() {
         "panel margins should still allow focusing the panel below"
     );
     assert_eq!(grid.current, bottom);
+}
+
+#[test]
+fn test_invalidate_visible_panels_for_full_redraw_marks_all_split_panels_dirty() {
+    let text_dimensions = TextDimensions {
+        width: 10.0,
+        height: 20.0,
+        scale: 1.0,
+    };
+    let dimension =
+        ContextDimension::build(1210.0, 900.0, text_dimensions, 1.0, Margin::all(0.0));
+    let mut grid = ContextGrid::new(
+        create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
+        Margin::all(0.0),
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+        rio_backend::config::layout::Panel::default(),
+    );
+
+    let right = grid.try_split_right().unwrap();
+    grid.inner.insert(
+        right,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            2,
+            2,
+            dimension,
+        )),
+    );
+    grid.calculate_positions();
+
+    for item in grid.contexts_mut().values_mut() {
+        item.val.renderable_content.pending_update.reset();
+        assert!(!item.val.renderable_content.pending_update.is_dirty());
+    }
+
+    grid.invalidate_visible_panels_for_full_redraw();
+
+    for item in grid.contexts_mut().values_mut() {
+        let pending = &mut item.val.renderable_content.pending_update;
+        assert!(pending.is_dirty());
+        assert_eq!(pending.take_terminal_damage(), Some(TerminalDamage::Full));
+    }
 }

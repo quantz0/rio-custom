@@ -520,6 +520,8 @@ pub fn default_config_file_content() -> String {
 # [bindings]
 # keys = [
 #   { key = "q", with = "super", action = "Quit" },
+#   # Copy the current selection, otherwise send Ctrl+C/ETX to the terminal
+#   { key = "c", with = "control", action = "CopyOrInterrupt" },
 #   # Send escape sequence to clear screen
 #   { key = "l", with = "control", esc = "\u001b[2J\u001b[H" }
 # ]

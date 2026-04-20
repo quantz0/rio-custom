@@ -5,7 +5,7 @@ use crate::context::Context;
 use crate::mouse::Mouse;
 use rio_backend::config::layout::Margin;
 use rio_backend::crosswords::grid::Dimensions;
-use rio_backend::event::EventListener;
+use rio_backend::event::{EventListener, TerminalDamage};
 use rio_backend::sugarloaf::{layout::TextDimensions, Object, Rect, RichText, Sugarloaf};
 use rustc_hash::FxHashMap;
 
@@ -1216,8 +1216,26 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             let _ = item.val.messenger.send_resize(winsize);
         }
 
+        self.invalidate_visible_panels_for_full_redraw();
         self.sync_rich_text_layout_state(sugarloaf);
         true
+    }
+
+    pub fn invalidate_visible_panels_for_full_redraw(&mut self) {
+        let visible_nodes: FxHashMap<NodeId, bool> = self
+            .inner
+            .keys()
+            .map(|&node_id| (node_id, self.is_node_visible(node_id)))
+            .collect();
+
+        for (node_id, item) in self.inner.iter_mut() {
+            if visible_nodes.get(node_id).copied().unwrap_or(true) {
+                item.val
+                    .renderable_content
+                    .pending_update
+                    .set_terminal_damage(TerminalDamage::Full);
+            }
+        }
     }
 
     #[inline]

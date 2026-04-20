@@ -84,6 +84,21 @@ const MAX_SEARCH_WHILE_TYPING: Option<usize> = Some(1000);
 /// Maximum number of search terms stored in the history.
 const MAX_SEARCH_HISTORY_SIZE: usize = 255;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyOrInterruptDisposition {
+    CopySelection,
+    SendInterrupt,
+}
+
+#[inline]
+fn copy_or_interrupt_disposition(selection_is_empty: bool) -> CopyOrInterruptDisposition {
+    if selection_is_empty {
+        CopyOrInterruptDisposition::SendInterrupt
+    } else {
+        CopyOrInterruptDisposition::CopySelection
+    }
+}
+
 pub struct Screen<'screen> {
     bindings: crate::bindings::KeyBindings,
     mouse_bindings: Vec<MouseBinding>,
@@ -467,7 +482,10 @@ impl Screen<'_> {
             self.sugarloaf.clear_background_image();
         }
 
+        self.context_manager
+            .keep_only_active_context_visible(&mut self.sugarloaf);
         self.resize_all_contexts();
+        mark_all_contexts_for_full_redraw(&mut self.context_manager);
     }
 
     #[inline]
@@ -856,6 +874,16 @@ impl Screen<'_> {
                     }
                     Act::Copy => {
                         self.copy_selection(ClipboardType::Clipboard, clipboard);
+                    }
+                    Act::CopyOrInterrupt => {
+                        match copy_or_interrupt_disposition(self.selection_is_empty()) {
+                            CopyOrInterruptDisposition::CopySelection => {
+                                self.copy_selection(ClipboardType::Clipboard, clipboard);
+                            }
+                            CopyOrInterruptDisposition::SendInterrupt => {
+                                self.send_interrupt_to_pty();
+                            }
+                        }
                     }
                     Act::Hint(hint_config) => {
                         self.start_hint_mode(hint_config.clone());
@@ -1729,6 +1757,16 @@ impl Screen<'_> {
         drop(terminal);
 
         clipboard.set(ty, text);
+    }
+
+    #[inline]
+    fn send_interrupt_to_pty(&mut self) {
+        self.scroll_bottom_when_cursor_not_visible();
+        self.clear_selection();
+        self.ctx_mut()
+            .current_mut()
+            .messenger
+            .send_write(&b"\x03"[..]);
     }
 
     #[inline]
@@ -4118,6 +4156,22 @@ mod tests {
         assert_eq!(
             post_process_hyperlink_uri("https://example.com/path[with]brackets"),
             "https://example.com/path[with]brackets"
+        );
+    }
+
+    #[test]
+    fn copy_or_interrupt_disposition_prefers_copy_when_selection_exists() {
+        assert_eq!(
+            copy_or_interrupt_disposition(false),
+            CopyOrInterruptDisposition::CopySelection
+        );
+    }
+
+    #[test]
+    fn copy_or_interrupt_disposition_sends_interrupt_when_selection_is_empty() {
+        assert_eq!(
+            copy_or_interrupt_disposition(true),
+            CopyOrInterruptDisposition::SendInterrupt
         );
     }
 }

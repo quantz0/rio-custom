@@ -63,6 +63,7 @@ Execute a predefined action in Rio terminal.
 | ToggleVIMode     | |
 | Paste            | Paste command |
 | Copy             | Copy command |
+| CopyOrInterrupt  | Copy current selection, otherwise send terminal interrupt (`Ctrl+C` / ETX) |
 | OpenConfigEditor | Open configuration file on configured editor property |
 | ResetFontSize    | |
 | IncreaseFontSize | |
@@ -300,6 +301,7 @@ If you are missing a key binding that you believe that should be a default in th
 | -------------------- | ----------------------------------------------------------- |
 | Open configuration   | `Control + Shift + Comma (,)`                               |
 | Toggle VI Mode       | `Control + Shift + Space`                                   |
+| Copy / Interrupt     | `Control + C`                                               |
 | Copy                 | `Control + Shift + C`                                       |
 | Paste                | `Control + Shift + V`                                       |
 | Create new window    | `Control + Shift + N`                                       |
@@ -337,6 +339,7 @@ If you are missing a key binding that you believe that should be a default in th
 | -------------------- | -------------------------------------------------------------- |
 | Open configuration   | `Control + Shift + Comma (,)`                                  |
 | Toggle VI Mode       | `Alt + Shift + Space`                                          |
+| Copy / Interrupt     | `Control + C`                                                  |
 | Copy                 | `Control + Shift + C`                                          |
 | Paste                | `Control + Shift + V`                                          |
 | Create new window    | `Control + Shift + N`                                          |

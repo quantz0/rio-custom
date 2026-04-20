@@ -15,6 +15,7 @@ use raw_window_handle::HasDisplayHandle;
 use rio_backend::clipboard::{Clipboard, ClipboardType};
 use rio_backend::config::colors::{ColorRgb, NamedColor};
 use rio_window::application::ApplicationHandler;
+use rio_window::dpi::PhysicalSize;
 use rio_window::event::{
     ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, TouchPhase, WindowEvent,
 };
@@ -36,6 +37,36 @@ pub struct Application<'a> {
     router: Router<'a>,
     scheduler: Scheduler,
     app_id: Option<String>,
+}
+
+#[inline]
+fn resolve_resize_target_size(
+    rendered_size: PhysicalSize<u32>,
+    event_size: Option<PhysicalSize<u32>>,
+    actual_size: PhysicalSize<u32>,
+) -> Option<PhysicalSize<u32>> {
+    let actual_size =
+        (actual_size.width > 0 && actual_size.height > 0).then_some(actual_size);
+    let event_size = event_size.filter(|size| size.width > 0 && size.height > 0);
+
+    let target_size = match (actual_size, event_size) {
+        (Some(actual), Some(event)) if actual != event => actual,
+        (Some(actual), _) => actual,
+        (_, Some(event)) => event,
+        _ => return None,
+    };
+
+    (target_size != rendered_size).then_some(target_size)
+}
+
+#[inline]
+fn rendered_window_size_to_physical(
+    rendered_size: rio_backend::sugarloaf::SugarloafWindowSize,
+) -> PhysicalSize<u32> {
+    PhysicalSize::new(
+        rendered_size.width.round() as u32,
+        rendered_size.height.round() as u32,
+    )
 }
 
 impl Application<'_> {
@@ -414,6 +445,8 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     } else {
                         route.clear_errors();
                     }
+
+                    route.request_redraw();
                 }
             }
             RioEventType::Rio(RioEvent::Exit) => {
@@ -790,6 +823,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             .set_fullscreen(Some(Fullscreen::Borderless(None))),
                         _ => route.window.winit_window.set_fullscreen(None),
                     }
+                    route.request_redraw();
                 }
             }
             RioEventType::Rio(RioEvent::ToggleAppearanceTheme) => {
@@ -818,6 +852,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         false,
                     );
                     route.window.configure_window(&self.config);
+                    route.request_redraw();
                 }
             }
             RioEventType::Rio(RioEvent::ColorChange(route_id, index, color)) => {
@@ -1638,6 +1673,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     false,
                 );
                 route.window.configure_window(&self.config);
+                route.request_redraw();
             }
 
             WindowEvent::DroppedFile(path) => {
@@ -1650,11 +1686,15 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
 
             WindowEvent::Resized(new_size) => {
-                if new_size.width == 0 || new_size.height == 0 {
-                    return;
+                let rendered_size = rendered_window_size_to_physical(
+                    route.window.screen.sugarloaf.window_size(),
+                );
+                let actual_size = route.window.winit_window.inner_size();
+                if let Some(target_size) =
+                    resolve_resize_target_size(rendered_size, Some(new_size), actual_size)
+                {
+                    route.window.screen.resize(target_size);
                 }
-
-                route.window.screen.resize(new_size);
                 route.request_redraw();
             }
 
@@ -1672,6 +1712,17 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
 
             WindowEvent::RedrawRequested => {
+                let rendered_size = rendered_window_size_to_physical(
+                    route.window.screen.sugarloaf.window_size(),
+                );
+                if let Some(target_size) = resolve_resize_target_size(
+                    rendered_size,
+                    None,
+                    route.window.winit_window.inner_size(),
+                ) {
+                    route.window.screen.resize(target_size);
+                }
+
                 // let start = std::time::Instant::now();
                 route.window.winit_window.pre_present_notify();
 
@@ -1916,4 +1967,46 @@ where
     std::thread::sleep(crate::constants::BELL_DURATION);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_resize_target_size;
+    use rio_window::dpi::PhysicalSize;
+
+    #[test]
+    fn resize_prefers_actual_window_size_over_stale_event_size() {
+        let rendered_size = PhysicalSize::new(1280, 720);
+        let stale_event_size = Some(PhysicalSize::new(1920, 1040));
+        let actual_size = PhysicalSize::new(1920, 1080);
+
+        assert_eq!(
+            resolve_resize_target_size(rendered_size, stale_event_size, actual_size),
+            Some(actual_size)
+        );
+    }
+
+    #[test]
+    fn resize_skips_when_rendered_size_is_already_current() {
+        let rendered_size = PhysicalSize::new(1920, 1080);
+        let event_size = Some(PhysicalSize::new(1920, 1080));
+        let actual_size = PhysicalSize::new(1920, 1080);
+
+        assert_eq!(
+            resolve_resize_target_size(rendered_size, event_size, actual_size),
+            None
+        );
+    }
+
+    #[test]
+    fn resize_ignores_zero_sized_events_without_actual_window_size() {
+        let rendered_size = PhysicalSize::new(1280, 720);
+        let zero_event_size = Some(PhysicalSize::new(0, 1080));
+        let zero_actual_size = PhysicalSize::new(0, 0);
+
+        assert_eq!(
+            resolve_resize_target_size(rendered_size, zero_event_size, zero_actual_size),
+            None
+        );
+    }
 }
