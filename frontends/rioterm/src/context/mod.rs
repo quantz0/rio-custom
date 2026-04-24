@@ -772,8 +772,12 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
         height: f32,
         sugarloaf: &mut Sugarloaf,
     ) {
-        for context_grid in self.contexts.iter_mut() {
-            context_grid.resize(width, height, sugarloaf);
+        for (index, context_grid) in self.contexts.iter_mut().enumerate() {
+            if index == self.current_index {
+                context_grid.resize(width, height, sugarloaf);
+            } else {
+                context_grid.resize_inactive(width, height);
+            }
         }
 
         // `ContextGrid::resize` reapplies panel-local visibility for every grid.

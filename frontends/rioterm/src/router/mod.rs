@@ -56,6 +56,11 @@ impl Route<'_> {
 impl Route<'_> {
     #[inline]
     pub fn request_redraw(&mut self) {
+        if self.window.redraw_requested {
+            return;
+        }
+
+        self.window.redraw_requested = true;
         self.window.winit_window.request_redraw();
     }
 
@@ -94,6 +99,7 @@ impl Route<'_> {
 
     #[inline]
     pub fn begin_render(&mut self) {
+        self.window.redraw_requested = false;
         self.window.render_timestamp = Instant::now();
     }
 
@@ -590,6 +596,7 @@ pub struct RouteWindow<'a> {
     pub is_focused: bool,
     pub is_occluded: bool,
     pub needs_render_after_occlusion: bool,
+    pub redraw_requested: bool,
     pub render_timestamp: Instant,
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub vblank_interval: Duration,
@@ -770,6 +777,7 @@ impl<'a> RouteWindow<'a> {
             is_focused: true,
             is_occluded: false,
             needs_render_after_occlusion: false,
+            redraw_requested: false,
             winit_window,
             screen,
         }

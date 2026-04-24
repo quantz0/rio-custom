@@ -150,6 +150,12 @@ impl PendingUpdate {
         self.dirty
     }
 
+    /// Check whether terminal content repaint is pending.
+    #[inline]
+    pub fn has_terminal_damage(&self) -> bool {
+        self.terminal_damage.is_some()
+    }
+
     /// Mark as needing to check for damage on next render
     pub fn set_dirty(&mut self) {
         self.dirty = true;

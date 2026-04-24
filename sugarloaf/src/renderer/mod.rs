@@ -10,6 +10,7 @@ mod text_run_manager;
 use crate::components::core::orthographic_projection;
 use crate::context::webgpu::WgpuContext;
 use crate::context::{Context, ContextType};
+use crate::font::text_run_cache::ShapedGlyph;
 use crate::font::FontLibrary;
 use crate::font_introspector::GlyphId;
 use crate::layout::{TextDimensions, TextLayout};
@@ -47,6 +48,43 @@ pub const BLEND: Option<wgpu::BlendState> = Some(wgpu::BlendState {
         operation: wgpu::BlendOperation::Add,
     },
 });
+
+#[inline]
+fn append_positioned_glyphs(
+    glyphs: &mut Vec<Glyph>,
+    shaped_glyphs: &[ShapedGlyph],
+    baseline: f32,
+    px: &mut f32,
+    use_grid_cell_size: bool,
+    cell_width: f32,
+    char_width: f32,
+) {
+    let mut current_cluster = None;
+    let mut cluster_origin_x = *px;
+
+    for shaped_glyph in shaped_glyphs {
+        if use_grid_cell_size && current_cluster != Some(shaped_glyph.cluster) {
+            current_cluster = Some(shaped_glyph.cluster);
+            cluster_origin_x = *px;
+        }
+
+        glyphs.push(Glyph {
+            id: shaped_glyph.glyph_id as GlyphId,
+            x: if use_grid_cell_size {
+                cluster_origin_x + shaped_glyph.x_offset
+            } else {
+                *px + shaped_glyph.x_offset
+            },
+            y: baseline + shaped_glyph.y_offset,
+        });
+
+        if use_grid_cell_size {
+            *px += cell_width * char_width * shaped_glyph.cell_advance as f32;
+        } else {
+            *px += shaped_glyph.x_advance;
+        }
+    }
+}
 
 // `WgpuRenderer` is much larger than `MetalRenderer` (which shrunk to a
 // pool handle + a few pipeline states after the triple-buffer refactor),
@@ -1532,22 +1570,15 @@ impl Renderer {
                         } => {
                             // Use cached glyph data but need to render
                             glyphs.clear();
-                            for shaped_glyph in cached_glyphs.iter() {
-                                let x = px;
-                                let y = baseline;
-
-                                if use_grid_cell_size {
-                                    px += cell_width * char_width;
-                                } else {
-                                    px += shaped_glyph.x_advance;
-                                }
-
-                                glyphs.push(Glyph {
-                                    id: shaped_glyph.glyph_id as GlyphId,
-                                    x,
-                                    y,
-                                });
-                            }
+                            append_positioned_glyphs(
+                                &mut glyphs,
+                                cached_glyphs.as_ref(),
+                                baseline,
+                                &mut px,
+                                use_grid_cell_size,
+                                cell_width,
+                                char_width,
+                            );
 
                             // Render using cached glyph data
                             let style = TextRunStyle {
@@ -1605,35 +1636,15 @@ impl Renderer {
                         CacheResult::Miss => {
                             // No cached data - need to shape and render from scratch
                             glyphs.clear();
-                            let mut shaped_glyphs = Vec::new();
-
-                            for glyph in &run.glyphs {
-                                let x = px;
-                                let y = baseline;
-                                let advance = glyph.simple_data().1;
-
-                                if use_grid_cell_size {
-                                    px += cell_width * char_width;
-                                } else {
-                                    px += advance;
-                                }
-
-                                let glyph_id = glyph.simple_data().0;
-
-                                glyphs.push(Glyph { id: glyph_id, x, y });
-
-                                // Store for caching
-                                shaped_glyphs.push(
-                                    crate::font::text_run_cache::ShapedGlyph {
-                                        glyph_id: glyph_id as u32,
-                                        x_advance: advance,
-                                        y_advance: 0.0,
-                                        x_offset: 0.0,
-                                        y_offset: 0.0,
-                                        cluster: 0,
-                                    },
-                                );
-                            }
+                            append_positioned_glyphs(
+                                &mut glyphs,
+                                &run.shaped_glyphs,
+                                baseline,
+                                &mut px,
+                                use_grid_cell_size,
+                                cell_width,
+                                char_width,
+                            );
 
                             // Cache the shaped glyphs for future use
                             if run.cache_key != 0 {
@@ -1641,7 +1652,7 @@ impl Renderer {
                                     run.cache_key,
                                     font,
                                     run.size,
-                                    shaped_glyphs,
+                                    run.shaped_glyphs.clone(),
                                     false,
                                 );
                             }
@@ -3442,6 +3453,9 @@ impl WgpuRenderer {
 #[cfg(test)]
 mod rect_positioning_tests {
     // ... existing tests remain the same ...
+    use super::append_positioned_glyphs;
+    use crate::font::text_run_cache::ShapedGlyph;
+
     #[derive(Debug)]
     struct GlyphRect {
         #[allow(unused)]
@@ -3716,5 +3730,97 @@ mod rect_positioning_tests {
             !last_rendered_graphic.contains(&graphic_id),
             "After clear, graphic should be renderable again"
         );
+    }
+
+    #[test]
+    fn test_append_positioned_glyphs_uses_cluster_cell_advance_in_grid_mode() {
+        let shaped_glyphs = vec![
+            ShapedGlyph {
+                glyph_id: 1,
+                x_advance: 8.0,
+                y_advance: 0.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                cluster: 0,
+                cell_advance: 2,
+            },
+            ShapedGlyph {
+                glyph_id: 2,
+                x_advance: 8.0,
+                y_advance: 0.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                cluster: 1,
+                cell_advance: 1,
+            },
+        ];
+        let mut glyphs = Vec::new();
+        let mut px = 0.0;
+
+        append_positioned_glyphs(
+            &mut glyphs,
+            &shaped_glyphs,
+            10.0,
+            &mut px,
+            true,
+            8.0,
+            1.0,
+        );
+
+        assert_eq!(glyphs.len(), 2);
+        assert_eq!(glyphs[0].x, 0.0);
+        assert_eq!(glyphs[1].x, 16.0);
+        assert_eq!(px, 24.0);
+    }
+
+    #[test]
+    fn test_append_positioned_glyphs_keeps_same_cluster_origin_for_marks() {
+        let shaped_glyphs = vec![
+            ShapedGlyph {
+                glyph_id: 1,
+                x_advance: 8.0,
+                y_advance: 0.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                cluster: 0,
+                cell_advance: 1,
+            },
+            ShapedGlyph {
+                glyph_id: 2,
+                x_advance: 0.0,
+                y_advance: 0.0,
+                x_offset: 2.0,
+                y_offset: 0.0,
+                cluster: 0,
+                cell_advance: 0,
+            },
+            ShapedGlyph {
+                glyph_id: 3,
+                x_advance: 8.0,
+                y_advance: 0.0,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                cluster: 1,
+                cell_advance: 1,
+            },
+        ];
+        let mut glyphs = Vec::new();
+        let mut px = 0.0;
+
+        append_positioned_glyphs(
+            &mut glyphs,
+            &shaped_glyphs,
+            10.0,
+            &mut px,
+            true,
+            8.0,
+            1.0,
+        );
+
+        assert_eq!(glyphs.len(), 3);
+        assert_eq!(glyphs[0].x, 0.0);
+        assert_eq!(glyphs[1].x, 2.0);
+        assert_eq!(glyphs[2].x, 8.0);
+        assert_eq!(px, 16.0);
     }
 }

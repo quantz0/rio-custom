@@ -24,12 +24,34 @@ use crate::font_introspector::Attributes;
 use crate::font_introspector::Setting;
 use crate::{sugarloaf::primitives::SugarCursor, DrawableChar, Graphic};
 
+const TERMINAL_GRID_DISABLED_SUBSTITUTIONS: [(&str, u16); 5] = [
+    ("liga", 0),
+    ("clig", 0),
+    ("dlig", 0),
+    ("hlig", 0),
+    ("calt", 0),
+];
+
+fn terminal_grid_shape_features(
+    features: &[Setting<u16>],
+) -> SmallVec<[Setting<u16>; 8]> {
+    let mut grid_features = SmallVec::new();
+    grid_features.extend(features.iter().copied());
+    grid_features.extend(
+        TERMINAL_GRID_DISABLED_SUBSTITUTIONS
+            .iter()
+            .map(Setting::from),
+    );
+    grid_features
+}
+
 /// Pre-packed shaping result ready to push directly as a RunData.
 /// Avoids re-packing OwnedGlyphClusters on every cache hit.
 #[derive(Clone, Debug)]
 pub struct CachedRun {
     pub glyphs: Vec<crate::layout::glyph::GlyphData>,
     pub detailed_glyphs: Vec<crate::layout::glyph::Glyph>,
+    pub shaped_glyphs: Vec<crate::font::text_run_cache::ShapedGlyph>,
     pub advance: f32,
     pub cache_key: u64,
 }
@@ -705,6 +727,7 @@ impl Content {
             // Process each line
             for line_number in 0..num_lines {
                 let content_state = &mut self.transient_texts[transient_idx];
+                let use_grid_cell_size = content_state.render_data.use_grid_cell_size;
                 let text_state = match content_state.as_text_mut() {
                     Some(state) => state,
                     None => continue,
@@ -715,6 +738,7 @@ impl Content {
                     line_number,
                     scaled_font_size,
                     script,
+                    use_grid_cell_size,
                     &self.font_features,
                     &self.fonts,
                     &mut self.scx,
@@ -951,6 +975,7 @@ impl Content {
             Some(state) => state,
             None => return,
         };
+        let use_grid_cell_size = content_state.render_data.use_grid_cell_size;
 
         let text_state = match content_state.as_text_mut() {
             Some(state) => state,
@@ -962,6 +987,7 @@ impl Content {
             line_number,
             scaled_font_size,
             script,
+            use_grid_cell_size,
             features,
             &self.fonts,
             &mut self.scx,
@@ -975,6 +1001,7 @@ impl Content {
         line_number: usize,
         scaled_font_size: f32,
         script: Script,
+        use_grid_cell_size: bool,
         features: &[crate::font_introspector::Setting<u16>],
         fonts: &FontLibrary,
         scx: &mut ShapeContext,
@@ -1022,8 +1049,28 @@ impl Content {
                 }
             };
 
+            let grid_features;
+            let shape_features = if use_grid_cell_size {
+                // Terminal grid text is cell-addressed. Multi-codepoint
+                // substitution features can collapse visible cells into one
+                // glyph, which makes characters appear missing until a
+                // selection splits the run.
+                grid_features = terminal_grid_shape_features(features);
+                grid_features.as_slice()
+            } else {
+                features
+            };
+            let vars = text_state.vars.get(font_vars);
+
             // Check run cache — pre-packed so no re-packing needed
-            if let Some(cached_run) = shaping_cache.get(&font_id, content) {
+            if let Some(cached_run) = shaping_cache.get(
+                &font_id,
+                content,
+                scaled_font_size,
+                script,
+                shape_features,
+                vars,
+            ) {
                 if let Some((ascent, descent, leading)) = if font_id == 0 {
                     metrics_result
                 } else {
@@ -1048,10 +1095,17 @@ impl Content {
             }
 
             // Cache miss: shape the full run and store result
-            shaping_cache.set_content(font_id, content);
+            shaping_cache.set_content(
+                font_id,
+                content,
+                scaled_font_size,
+                script,
+                shape_features,
+                vars,
+            );
 
             // Only allocate vars on the miss path
-            let vars: Vec<_> = text_state.vars.get(font_vars).to_vec();
+            let vars: Vec<_> = vars.to_vec();
 
             let font_library = &fonts.inner.read();
             if let Some((shared_data, offset, key)) = font_library.get_data(&font_id) {
@@ -1064,7 +1118,7 @@ impl Content {
                     .builder(font_ref)
                     .script(script)
                     .size(scaled_font_size)
-                    .features(features.iter().copied())
+                    .features(shape_features.iter().copied())
                     .variations(vars.iter().copied())
                     .build();
 
@@ -1075,6 +1129,7 @@ impl Content {
                     scaled_font_size,
                     line_number as u32,
                     shaper,
+                    content,
                     shaping_cache,
                 );
             }
@@ -1384,11 +1439,11 @@ impl Content {
 
 /// Run-level shaping cache (like Ghostty's ShaperCache).
 ///
-/// Caches pre-packed shaped runs per text run, keyed by (content + font_id).
-/// The shaper always sees the full run so ligatures are handled naturally.
+/// Caches pre-packed shaped runs per text run and shaping inputs.
+/// The shaper always sees the full run so non-grid ligatures are handled naturally.
 /// Stores packed GlyphData directly so cache hits avoid re-packing.
 pub struct ShapingCache {
-    /// LRU cache per font_id: hash(content + font_id) → pre-packed run
+    /// LRU cache per font_id: hash(shaping inputs) → pre-packed run
     inner: FxHashMap<usize, LruCache<u64, CachedRun>>,
     /// Current shaping context
     font_id: usize,
@@ -1412,8 +1467,16 @@ impl ShapingCache {
 
     /// Look up a pre-packed cached run.
     #[inline]
-    pub fn get(&mut self, font_id: &usize, content: &str) -> Option<&CachedRun> {
-        let key = Self::cache_key(content, *font_id);
+    pub fn get(
+        &mut self,
+        font_id: &usize,
+        content: &str,
+        size: f32,
+        script: Script,
+        features: &[Setting<u16>],
+        vars: &[Setting<f32>],
+    ) -> Option<&CachedRun> {
+        let key = Self::cache_key(content, *font_id, size, script, features, vars);
         if let Some(cache) = self.inner.get_mut(font_id) {
             return cache.get(&key);
         }
@@ -1422,9 +1485,18 @@ impl ShapingCache {
 
     /// Record which content is about to be shaped (called before shaping).
     #[inline]
-    pub fn set_content(&mut self, font_id: usize, content: &str) {
+    pub fn set_content(
+        &mut self,
+        font_id: usize,
+        content: &str,
+        size: f32,
+        script: Script,
+        features: &[Setting<u16>],
+        vars: &[Setting<f32>],
+    ) {
         self.font_id = font_id;
-        self.content_hash = Self::cache_key(content, font_id);
+        self.content_hash =
+            Self::cache_key(content, font_id, size, script, features, vars);
     }
 
     /// Store a pre-packed run in the cache after shaping.
@@ -1452,12 +1524,33 @@ impl ShapingCache {
         debug!("ShapingCache cleared");
     }
 
-    /// Compute a position-independent cache key from content and font_id.
+    /// Compute a position-independent cache key from every input that affects
+    /// shaping. Content alone is insufficient because the same run can be
+    /// shaped differently across font sizes, scripts, features, and variations.
     #[inline]
-    pub fn cache_key(content: &str, font_id: usize) -> u64 {
+    pub fn cache_key(
+        content: &str,
+        font_id: usize,
+        size: f32,
+        script: Script,
+        features: &[Setting<u16>],
+        vars: &[Setting<f32>],
+    ) -> u64 {
         let mut hasher = rustc_hash::FxHasher::default();
         content.hash(&mut hasher);
         font_id.hash(&mut hasher);
+        size.to_bits().hash(&mut hasher);
+        script.hash(&mut hasher);
+        features.len().hash(&mut hasher);
+        for feature in features {
+            feature.tag.hash(&mut hasher);
+            feature.value.hash(&mut hasher);
+        }
+        vars.len().hash(&mut hasher);
+        for var in vars {
+            var.tag.hash(&mut hasher);
+            var.value.to_bits().hash(&mut hasher);
+        }
         hasher.finish()
     }
 }
@@ -1468,6 +1561,25 @@ mod tests {
     use crate::font::FontLibrary;
     use crate::font_introspector::shape::cluster::{Glyph, OwnedGlyphCluster};
     use crate::font_introspector::text::cluster::SourceRange;
+
+    const TEST_FONT_SIZE: f32 = 16.0;
+    const TEST_SCRIPT: Script = Script::Latin;
+
+    fn cache_get_default<'a>(
+        cache: &'a mut ShapingCache,
+        font_id: &usize,
+        content: &str,
+    ) -> Option<&'a CachedRun> {
+        cache.get(font_id, content, TEST_FONT_SIZE, TEST_SCRIPT, &[], &[])
+    }
+
+    fn cache_set_default(cache: &mut ShapingCache, font_id: usize, content: &str) {
+        cache.set_content(font_id, content, TEST_FONT_SIZE, TEST_SCRIPT, &[], &[]);
+    }
+
+    fn cache_key_default(content: &str, font_id: usize) -> u64 {
+        ShapingCache::cache_key(content, font_id, TEST_FONT_SIZE, TEST_SCRIPT, &[], &[])
+    }
 
     fn create_test_glyph(id: u16, x: f32, y: f32, advance: f32) -> Glyph {
         Glyph {
@@ -1499,6 +1611,21 @@ mod tests {
 
     fn make_cached_run(glyphs: &[(u16, f32)]) -> CachedRun {
         use crate::layout::glyph::GlyphData;
+        let shaped_glyphs = glyphs
+            .iter()
+            .enumerate()
+            .map(
+                |(index, &(id, advance))| crate::font::text_run_cache::ShapedGlyph {
+                    glyph_id: id as u32,
+                    x_advance: advance,
+                    y_advance: 0.0,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                    cluster: index as u32,
+                    cell_advance: 1,
+                },
+            )
+            .collect();
         let glyph_data: Vec<GlyphData> = glyphs
             .iter()
             .map(|&(id, advance)| GlyphData::simple(id, advance, 0))
@@ -1508,6 +1635,39 @@ mod tests {
         CachedRun {
             glyphs: glyph_data,
             detailed_glyphs: vec![],
+            shaped_glyphs,
+            advance,
+            cache_key,
+        }
+    }
+
+    fn make_cached_run_with_cell_advances(glyphs: &[(u16, f32, u16)]) -> CachedRun {
+        use crate::layout::glyph::GlyphData;
+        let shaped_glyphs = glyphs
+            .iter()
+            .enumerate()
+            .map(|(index, &(id, advance, cell_advance))| {
+                crate::font::text_run_cache::ShapedGlyph {
+                    glyph_id: id as u32,
+                    x_advance: advance,
+                    y_advance: 0.0,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                    cluster: index as u32,
+                    cell_advance,
+                }
+            })
+            .collect();
+        let glyph_data: Vec<GlyphData> = glyphs
+            .iter()
+            .map(|&(id, advance, _)| GlyphData::simple(id, advance, 0))
+            .collect();
+        let advance = glyphs.iter().map(|g| g.1).sum();
+        let cache_key = 42; // dummy
+        CachedRun {
+            glyphs: glyph_data,
+            detailed_glyphs: vec![],
+            shaped_glyphs,
             advance,
             cache_key,
         }
@@ -1554,10 +1714,10 @@ mod tests {
         let font_id = 0;
 
         // Empty cache: miss
-        assert!(cache.get(&font_id, "hello").is_none());
+        assert!(cache_get_default(&mut cache, &font_id, "hello").is_none());
 
         // Store a pre-packed run for "hello"
-        cache.set_content(font_id, "hello");
+        cache_set_default(&mut cache, font_id, "hello");
         cache.finish_with_run(make_cached_run(&[
             (104, 8.0),
             (101, 8.0),
@@ -1567,14 +1727,20 @@ mod tests {
         ]));
 
         // Same run: hit
-        assert!(cache.get(&font_id, "hello").is_some());
-        assert_eq!(cache.get(&font_id, "hello").unwrap().glyphs.len(), 5);
+        assert!(cache_get_default(&mut cache, &font_id, "hello").is_some());
+        assert_eq!(
+            cache_get_default(&mut cache, &font_id, "hello")
+                .unwrap()
+                .glyphs
+                .len(),
+            5
+        );
 
         // Different run: miss
-        assert!(cache.get(&font_id, "world").is_none());
+        assert!(cache_get_default(&mut cache, &font_id, "world").is_none());
 
         // Different font: miss
-        assert!(cache.get(&1, "hello").is_none());
+        assert!(cache_get_default(&mut cache, &1, "hello").is_none());
     }
 
     #[test]
@@ -1583,12 +1749,13 @@ mod tests {
         let font_id = 0;
 
         // Store "=>" as a single ligature glyph
-        cache.set_content(font_id, "=>");
-        cache.finish_with_run(make_cached_run(&[(999, 16.0)]));
+        cache_set_default(&mut cache, font_id, "=>");
+        cache.finish_with_run(make_cached_run_with_cell_advances(&[(999, 16.0, 2)]));
 
         // Should hit and preserve the ligature (1 glyph, not 2)
-        let cached = cache.get(&font_id, "=>").unwrap();
+        let cached = cache_get_default(&mut cache, &font_id, "=>").unwrap();
         assert_eq!(cached.glyphs.len(), 1);
+        assert_eq!(cached.shaped_glyphs[0].cell_advance, 2);
     }
 
     #[test]
@@ -1596,31 +1763,99 @@ mod tests {
         let mut cache = ShapingCache::new();
         let font_id = 0;
 
-        cache.set_content(font_id, "test");
+        cache_set_default(&mut cache, font_id, "test");
         cache.finish_with_run(make_cached_run(&[(1, 8.0)]));
 
-        assert!(cache.get(&font_id, "test").is_some());
+        assert!(cache_get_default(&mut cache, &font_id, "test").is_some());
         cache.clear();
-        assert!(cache.get(&font_id, "test").is_none());
+        assert!(cache_get_default(&mut cache, &font_id, "test").is_none());
     }
 
     #[test]
     fn test_shaping_cache_key_no_collision() {
-        let along_key = ShapingCache::cache_key("along", 1);
-        let clone_key = ShapingCache::cache_key("clone", 1);
+        let along_key = cache_key_default("along", 1);
+        let clone_key = cache_key_default("clone", 1);
         assert_ne!(along_key, clone_key);
 
         // Same content, different font
-        assert_ne!(
-            ShapingCache::cache_key("test", 0),
-            ShapingCache::cache_key("test", 1),
-        );
+        assert_ne!(cache_key_default("test", 0), cache_key_default("test", 1),);
 
         // Deterministic
-        assert_eq!(
-            ShapingCache::cache_key("test", 0),
-            ShapingCache::cache_key("test", 0),
+        assert_eq!(cache_key_default("test", 0), cache_key_default("test", 0),);
+    }
+
+    #[test]
+    fn test_shaping_cache_key_includes_shaping_inputs() {
+        let base_key = cache_key_default("test", 0);
+        let feature_on = [Setting::from(("liga", 1))];
+        let feature_off = [Setting::from(("liga", 0))];
+        let vars_regular = [Setting::from(("wght", 400.0))];
+        let vars_bold = [Setting::from(("wght", 700.0))];
+
+        assert_ne!(
+            base_key,
+            ShapingCache::cache_key("test", 0, 18.0, TEST_SCRIPT, &[], &[]),
         );
+        assert_ne!(
+            base_key,
+            ShapingCache::cache_key("test", 0, TEST_FONT_SIZE, Script::Greek, &[], &[],),
+        );
+        assert_ne!(
+            ShapingCache::cache_key(
+                "test",
+                0,
+                TEST_FONT_SIZE,
+                TEST_SCRIPT,
+                &feature_on,
+                &[],
+            ),
+            ShapingCache::cache_key(
+                "test",
+                0,
+                TEST_FONT_SIZE,
+                TEST_SCRIPT,
+                &feature_off,
+                &[],
+            ),
+        );
+        assert_ne!(
+            ShapingCache::cache_key(
+                "test",
+                0,
+                TEST_FONT_SIZE,
+                TEST_SCRIPT,
+                &[],
+                &vars_regular,
+            ),
+            ShapingCache::cache_key(
+                "test",
+                0,
+                TEST_FONT_SIZE,
+                TEST_SCRIPT,
+                &[],
+                &vars_bold,
+            ),
+        );
+    }
+
+    #[test]
+    fn test_terminal_grid_shape_features_disable_multi_cell_substitutions() {
+        let features = [Setting::from(("liga", 1)), Setting::from(("kern", 1))];
+        let grid_features = terminal_grid_shape_features(&features);
+
+        let last_feature_value = |tag: &str| {
+            let tag = Setting::from((tag, 0)).tag;
+            grid_features
+                .iter()
+                .rev()
+                .find(|feature| feature.tag == tag)
+                .map(|feature| feature.value)
+        };
+
+        assert_eq!(last_feature_value("kern"), Some(1));
+        for tag in ["liga", "clig", "dlig", "hlig", "calt"] {
+            assert_eq!(last_feature_value(tag), Some(0));
+        }
     }
 
     #[test]
@@ -1668,6 +1903,35 @@ mod tests {
     }
 
     #[test]
+    fn test_push_run_without_shaper_preserves_ligature_cell_advance() {
+        let mut render_data = RenderData::new();
+        let metrics = crate::font_introspector::Metrics {
+            ascent: 12.0,
+            descent: 4.0,
+            leading: 0.0,
+            ..Default::default()
+        };
+        let clusters = vec![create_test_cluster(
+            0,
+            2,
+            create_test_glyph(999, 0.0, 0.0, 8.0),
+        )];
+
+        render_data.push_run_without_shaper(
+            SpanStyle::default(),
+            16.0,
+            0,
+            "=>",
+            &clusters,
+            &metrics,
+        );
+
+        assert_eq!(render_data.runs.len(), 1);
+        assert_eq!(render_data.runs[0].shaped_glyphs.len(), 1);
+        assert_eq!(render_data.runs[0].shaped_glyphs[0].cell_advance, 2);
+    }
+
+    #[test]
     fn test_mixed_text_and_empty_runs_ordering() {
         // Simulates a line like: "ABC" + [empty] + [empty] + "DEF"
         // All runs should be in order and empty runs between text runs
@@ -1689,6 +1953,7 @@ mod tests {
             SpanStyle::default(),
             16.0,
             0,
+            "ABC",
             &clusters,
             &metrics,
         );
@@ -1707,6 +1972,7 @@ mod tests {
             SpanStyle::default(),
             16.0,
             0,
+            "DEF",
             &clusters2,
             &metrics,
         );

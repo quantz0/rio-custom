@@ -69,6 +69,21 @@ fn rendered_window_size_to_physical(
     )
 }
 
+#[inline]
+fn is_text_selection_drag(
+    lmb_pressed: bool,
+    rmb_pressed: bool,
+    shift_pressed: bool,
+    mouse_mode: bool,
+) -> bool {
+    (lmb_pressed || rmb_pressed) && (shift_pressed || !mouse_mode)
+}
+
+#[inline]
+fn panel_switch_focus_only(shift_pressed: bool, mouse_mode: bool) -> bool {
+    mouse_mode && !shift_pressed
+}
+
 impl Application<'_> {
     pub fn new<'app>(
         config: rio_backend::config::Config,
@@ -1089,11 +1104,21 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         // Always try panel switching first: if the click
                         // targets a different panel, switch to it regardless
                         // of mouse mode (e.g. neovim capturing clicks).
-                        if route.window.screen.select_current_based_on_mouse() {
+                        let switched_panel =
+                            route.window.screen.select_current_based_on_mouse();
+                        if switched_panel {
                             route.request_redraw();
-                        } else if !route.window.screen.modifiers.state().shift_key()
-                            && route.window.screen.mouse_mode()
+                        }
+
+                        let shift_pressed =
+                            route.window.screen.modifiers.state().shift_key();
+                        let mouse_mode = route.window.screen.mouse_mode();
+
+                        if switched_panel
+                            && panel_switch_focus_only(shift_pressed, mouse_mode)
                         {
+                            // Keep mouse-mode applications from receiving the focus click.
+                        } else if !shift_pressed && mouse_mode {
                             // Process mouse press before bindings to update the `click_state`.
                             route.window.screen.mouse.click_state = ClickState::None;
 
@@ -1355,22 +1380,40 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     return;
                 }
 
-                // Check if hovering over a panel border
+                let lmb_pressed =
+                    route.window.screen.mouse.left_button_state == ElementState::Pressed;
+                let rmb_pressed =
+                    route.window.screen.mouse.right_button_state == ElementState::Pressed;
+                let shift_pressed = route.window.screen.modifiers.state().shift_key();
+                let mouse_mode = route.window.screen.mouse_mode();
+                let is_selecting = is_text_selection_drag(
+                    lmb_pressed,
+                    rmb_pressed,
+                    shift_pressed,
+                    mouse_mode,
+                );
+
+                // Check if hovering over a panel border. While a text selection
+                // drag is active, do not let the border hover path swallow
+                // CursorMoved, otherwise edge cells next to a split cannot be
+                // extended into the selection.
                 {
                     let grid = route.window.screen.context_manager.current_grid();
                     if let Some(border) = grid.find_border_at_position(x as f32, y as f32)
                     {
-                        let cursor = match border.direction {
-                            crate::layout::BorderDirection::Vertical => {
-                                CursorIcon::ColResize
-                            }
-                            crate::layout::BorderDirection::Horizontal => {
-                                CursorIcon::RowResize
-                            }
-                        };
-                        route.window.winit_window.set_cursor(cursor);
-                        route.window.screen.mouse.on_border = true;
-                        return;
+                        if !is_selecting {
+                            let cursor = match border.direction {
+                                crate::layout::BorderDirection::Vertical => {
+                                    CursorIcon::ColResize
+                                }
+                                crate::layout::BorderDirection::Horizontal => {
+                                    CursorIcon::RowResize
+                                }
+                            };
+                            route.window.winit_window.set_cursor(cursor);
+                            route.window.screen.mouse.on_border = true;
+                            return;
+                        }
                     }
                 }
 
@@ -1383,11 +1426,6 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 // Track leaving a border to force cursor reset below
                 let was_on_border = route.window.screen.mouse.on_border;
                 route.window.screen.mouse.on_border = false;
-
-                let lmb_pressed =
-                    route.window.screen.mouse.left_button_state == ElementState::Pressed;
-                let rmb_pressed =
-                    route.window.screen.mouse.right_button_state == ElementState::Pressed;
 
                 let has_selection = !route.window.screen.selection_is_empty();
                 if has_selection && (lmb_pressed || rmb_pressed) {
@@ -1434,12 +1472,6 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 {
                     return;
                 }
-
-                // Skip hint/hyperlink highlighting during active selection
-                // drag to avoid unnecessary terminal locks and regex matching.
-                let is_selecting = (lmb_pressed || rmb_pressed)
-                    && (route.window.screen.modifiers.state().shift_key()
-                        || !route.window.screen.mouse_mode());
 
                 if !is_selecting && route.window.screen.update_highlighted_hints() {
                     route.window.winit_window.set_cursor(CursorIcon::Pointer);
@@ -1651,6 +1683,10 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             WindowEvent::Occluded(occluded) => {
                 let was_occluded = route.window.is_occluded;
                 route.window.is_occluded = occluded;
+
+                if occluded {
+                    route.window.redraw_requested = false;
+                }
 
                 // If window was occluded and is now visible, mark for one-time render
                 if was_occluded && !occluded {
@@ -1972,7 +2008,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_resize_target_size;
+    use super::{
+        is_text_selection_drag, panel_switch_focus_only, resolve_resize_target_size,
+    };
     use rio_window::dpi::PhysicalSize;
 
     #[test]
@@ -2009,5 +2047,28 @@ mod tests {
             resolve_resize_target_size(rendered_size, zero_event_size, zero_actual_size),
             None
         );
+    }
+
+    #[test]
+    fn text_selection_drag_is_active_without_mouse_mode() {
+        assert!(is_text_selection_drag(true, false, false, false));
+    }
+
+    #[test]
+    fn text_selection_drag_is_active_with_shift_in_mouse_mode() {
+        assert!(is_text_selection_drag(true, false, true, true));
+    }
+
+    #[test]
+    fn text_selection_drag_is_inactive_in_mouse_mode_without_shift() {
+        assert!(!is_text_selection_drag(true, false, false, true));
+        assert!(!is_text_selection_drag(false, false, true, false));
+    }
+
+    #[test]
+    fn panel_switch_focus_only_keeps_mouse_mode_click_from_app() {
+        assert!(panel_switch_focus_only(false, true));
+        assert!(!panel_switch_focus_only(true, true));
+        assert!(!panel_switch_focus_only(false, false));
     }
 }

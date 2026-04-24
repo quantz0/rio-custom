@@ -37,7 +37,7 @@ use rio_backend::clipboard::ClipboardType;
 use rio_backend::config::layout::Margin;
 use rio_backend::config::renderer::{Backend, Performance as RendererPerformance};
 use rio_backend::crosswords::pos::{Boundary, CursorState, Direction, Line};
-use rio_backend::crosswords::search::RegexSearch;
+use rio_backend::crosswords::search::{Match, RegexSearch};
 use rio_backend::error::{RioError, RioErrorLevel, RioErrorType};
 use rio_backend::event::{ClickState, EventProxy, SearchState};
 use rio_backend::sugarloaf::{
@@ -99,6 +99,56 @@ fn copy_or_interrupt_disposition(selection_is_empty: bool) -> CopyOrInterruptDis
     }
 }
 
+#[derive(Debug, Default, Clone)]
+struct SearchRenderCache {
+    route_id: Option<usize>,
+    regex: Option<String>,
+    display_offset: Option<usize>,
+    history_size: Option<usize>,
+    focused_match: Option<Match>,
+    visible_matches: Option<Vec<Match>>,
+}
+
+impl SearchRenderCache {
+    #[inline]
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    #[inline]
+    fn has_visible_matches_for(
+        &self,
+        route_id: usize,
+        regex: &str,
+        display_offset: usize,
+        history_size: usize,
+    ) -> bool {
+        self.visible_matches.is_some()
+            && self.route_id == Some(route_id)
+            && self.regex.as_deref() == Some(regex)
+            && self.display_offset == Some(display_offset)
+            && self.history_size == Some(history_size)
+    }
+
+    #[inline]
+    fn update(
+        &mut self,
+        route_id: usize,
+        regex: String,
+        display_offset: usize,
+        history_size: usize,
+        focused_match: Option<Match>,
+        visible_matches: Option<Vec<Match>>,
+    ) {
+        self.route_id = Some(route_id);
+        self.regex = Some(regex);
+        self.display_offset = Some(display_offset);
+        self.history_size = Some(history_size);
+        self.focused_match = focused_match;
+        self.visible_matches = visible_matches;
+    }
+}
+
 pub struct Screen<'screen> {
     bindings: crate::bindings::KeyBindings,
     mouse_bindings: Vec<MouseBinding>,
@@ -110,6 +160,7 @@ pub struct Screen<'screen> {
     pub renderer: Renderer,
     pub sugarloaf: Sugarloaf<'screen>,
     pub context_manager: context::ContextManager<EventProxy>,
+    search_render_cache: SearchRenderCache,
     last_ime_cursor_pos: Option<(f32, f32)>,
     hints_config: Vec<std::rc::Rc<rio_backend::config::hints::Hint>>,
     pub resize_state: Option<crate::layout::ResizeState>,
@@ -320,6 +371,7 @@ impl Screen<'_> {
             touchpurpose: TouchPurpose::default(),
             renderer,
             bindings,
+            search_render_cache: SearchRenderCache::default(),
             last_ime_cursor_pos: None,
             resize_state: None,
         })
@@ -533,7 +585,6 @@ impl Screen<'_> {
 
         self.context_manager
             .resize_all_grids(width, height, &mut self.sugarloaf);
-        mark_all_contexts_for_full_redraw(&mut self.context_manager);
 
         self
     }
@@ -547,7 +598,13 @@ impl Screen<'_> {
         self.sugarloaf.rescale(new_scale);
         self.sugarloaf.resize(new_size.width, new_size.height);
 
-        for context_grid in self.context_manager.contexts_mut() {
+        let width = new_size.width as f32;
+        let height = new_size.height as f32;
+        let current_index = self.context_manager.current_index();
+
+        for (index, context_grid) in
+            self.context_manager.contexts_mut().iter_mut().enumerate()
+        {
             let margin = context_grid.get_scaled_margin();
             let old_scale = if context_grid.current().dimension.dimension.scale > 0.0 {
                 context_grid.current().dimension.dimension.scale
@@ -566,15 +623,16 @@ impl Screen<'_> {
                 margin.bottom * scale_ratio,
                 margin.left * scale_ratio,
             ));
-            context_grid.update_dimensions(&mut self.sugarloaf);
+            context_grid.refresh_dimensions_from_sugarloaf(&mut self.sugarloaf);
+            if index == current_index {
+                context_grid.resize(width, height, &mut self.sugarloaf);
+            } else {
+                context_grid.resize_inactive(width, height);
+            }
         }
 
-        let width = new_size.width as f32;
-        let height = new_size.height as f32;
-
         self.context_manager
-            .resize_all_grids(width, height, &mut self.sugarloaf);
-        mark_all_contexts_for_full_redraw(&mut self.context_manager);
+            .keep_only_active_context_visible(&mut self.sugarloaf);
 
         self
     }
@@ -657,6 +715,10 @@ impl Screen<'_> {
             } else {
                 mods & !ModifiersState::ALT
             };
+
+            if !Self::should_report_key_release(key, text, mode, mods) {
+                return;
+            }
 
             let bytes = match key.logical_key.as_ref() {
                 Key::Named(NamedKey::Enter)
@@ -778,28 +840,69 @@ impl Screen<'_> {
         mode: Mode,
         mods: ModifiersState,
     ) -> bool {
+        Self::should_build_sequence_for_key(
+            &key.logical_key,
+            key.location,
+            text,
+            mode,
+            mods,
+        )
+    }
+
+    fn should_build_sequence_for_key(
+        logical_key: &Key,
+        key_location: KeyLocation,
+        text: &str,
+        mode: Mode,
+        mods: ModifiersState,
+    ) -> bool {
         if mode.contains(Mode::REPORT_ALL_KEYS_AS_ESC) {
             return true;
         }
 
         let disambiguate = mode.contains(Mode::DISAMBIGUATE_ESC_CODES)
-            && (key.logical_key == Key::Named(NamedKey::Escape)
-                || key.location == KeyLocation::Numpad
+            && (*logical_key == Key::Named(NamedKey::Escape)
+                || key_location == KeyLocation::Numpad
                 || (!mods.is_empty()
                     && (mods != ModifiersState::SHIFT
                         || matches!(
-                            key.logical_key,
+                            logical_key,
                             Key::Named(NamedKey::Tab)
                                 | Key::Named(NamedKey::Enter)
                                 | Key::Named(NamedKey::Backspace)
                         ))));
 
-        match key.logical_key {
+        match logical_key {
             _ if disambiguate => true,
             // Exclude all the named keys unless they have textual representation.
             Key::Named(named) => named.to_text().is_none(),
             _ => text.is_empty(),
         }
+    }
+
+    fn should_report_key_release(
+        key: &rio_window::event::KeyEvent,
+        text: &str,
+        mode: Mode,
+        mods: ModifiersState,
+    ) -> bool {
+        Self::should_report_key_release_for_key(
+            &key.logical_key,
+            key.location,
+            text,
+            mode,
+            mods,
+        )
+    }
+
+    fn should_report_key_release_for_key(
+        logical_key: &Key,
+        key_location: KeyLocation,
+        text: &str,
+        mode: Mode,
+        mods: ModifiersState,
+    ) -> bool {
+        Self::should_build_sequence_for_key(logical_key, key_location, text, mode, mods)
     }
 
     #[inline]
@@ -2900,8 +3003,86 @@ impl Screen<'_> {
 
         // Clear focused match.
         self.search_state.focused_match = None;
+        self.search_render_cache.clear();
 
         self.render();
+    }
+
+    fn update_search_matches_for_render(&mut self) {
+        let Some(regex) = self.search_state.regex().cloned() else {
+            self.search_render_cache.clear();
+            self.context_manager
+                .current_mut()
+                .renderable_content
+                .hint_matches = None;
+            return;
+        };
+
+        let route_id = self.context_manager.current().route_id;
+        let focused_match = self.search_state.focused_match.clone();
+        let ui_has_terminal_damage = self
+            .context_manager
+            .current()
+            .renderable_content
+            .pending_update
+            .has_terminal_damage();
+
+        let (display_offset, history_size, has_terminal_damage) = {
+            let terminal = self.context_manager.current().terminal.lock();
+            (
+                terminal.display_offset(),
+                terminal.history_size(),
+                terminal.peek_damage_event().is_some(),
+            )
+        };
+
+        let cached_visible_matches_are_valid = !ui_has_terminal_damage
+            && !has_terminal_damage
+            && self.search_render_cache.has_visible_matches_for(
+                route_id,
+                &regex,
+                display_offset,
+                history_size,
+            );
+        let search_highlight_state_changed = !cached_visible_matches_are_valid
+            || self.search_render_cache.focused_match != focused_match;
+
+        let visible_matches = if cached_visible_matches_are_valid {
+            self.search_render_cache.visible_matches.clone()
+        } else {
+            let search_state = &mut self.search_state;
+            let context_manager = &mut self.context_manager;
+            let terminal = context_manager.current_mut().terminal.lock();
+
+            search_state.dfas_mut().map(|dfas| {
+                HintMatches::visible_regex_matches(&terminal, dfas)
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        self.context_manager
+            .current_mut()
+            .renderable_content
+            .hint_matches = visible_matches.clone();
+
+        if search_highlight_state_changed {
+            self.context_manager
+                .current_mut()
+                .renderable_content
+                .pending_update
+                .set_terminal_damage(rio_backend::event::TerminalDamage::Full);
+        }
+
+        self.search_render_cache.update(
+            route_id,
+            regex,
+            display_offset,
+            history_size,
+            focused_match,
+            visible_matches,
+        );
     }
 
     #[inline]
@@ -3478,30 +3659,15 @@ impl Screen<'_> {
             }
         } else {
             self.renderer.set_active_search(None);
-        }
-
-        if is_search_active {
-            // Update search hints in renderable content
-            let terminal = self.context_manager.current().terminal.lock();
-            let hints = self
-                .search_state
-                .dfas_mut()
-                .map(|dfas| HintMatches::visible_regex_matches(&terminal, dfas));
-            drop(terminal);
-
+            self.search_render_cache.clear();
             self.context_manager
                 .current_mut()
                 .renderable_content
-                .hint_matches = hints.map(|h| h.iter().cloned().collect());
+                .hint_matches = None;
+        }
 
-            // Force invalidation for search with full damage
-            {
-                let current = self.context_manager.current_mut();
-                current
-                    .renderable_content
-                    .pending_update
-                    .set_terminal_damage(rio_backend::event::TerminalDamage::Full);
-            }
+        if is_search_active {
+            self.update_search_matches_for_render();
         }
 
         // let renderer_run_start = std::time::Instant::now();
@@ -4198,5 +4364,44 @@ mod tests {
             copy_or_interrupt_disposition(true),
             CopyOrInterruptDisposition::SendInterrupt
         );
+    }
+
+    #[test]
+    fn key_release_does_not_report_plain_text_without_all_keys_as_esc() {
+        let mode = Mode::REPORT_EVENT_TYPES;
+
+        assert!(!Screen::should_report_key_release_for_key(
+            &Key::Character("c".into()),
+            KeyLocation::Standard,
+            "c",
+            mode,
+            ModifiersState::empty()
+        ));
+    }
+
+    #[test]
+    fn key_release_reports_plain_text_when_all_keys_as_esc_is_enabled() {
+        let mode = Mode::REPORT_EVENT_TYPES | Mode::REPORT_ALL_KEYS_AS_ESC;
+
+        assert!(Screen::should_report_key_release_for_key(
+            &Key::Character("c".into()),
+            KeyLocation::Standard,
+            "c",
+            mode,
+            ModifiersState::empty()
+        ));
+    }
+
+    #[test]
+    fn key_release_reports_non_text_keys_with_event_types_enabled() {
+        let mode = Mode::REPORT_EVENT_TYPES;
+
+        assert!(Screen::should_report_key_release_for_key(
+            &Key::Named(NamedKey::ArrowLeft),
+            KeyLocation::Standard,
+            "",
+            mode,
+            ModifiersState::empty()
+        ));
     }
 }

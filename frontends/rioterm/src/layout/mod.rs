@@ -484,6 +484,11 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
         let adj_x = x - self.scaled_margin.left;
         let adj_y = y - self.scaled_margin.top;
+
+        if self.point_inside_visible_terminal_grid(adj_x, adj_y) {
+            return None;
+        }
+
         let hit_half = (self.border_config.width / 2.0 + 3.0) * self.scale;
 
         self.walk_separators(|dir, center, span, child_a, child_b| {
@@ -508,6 +513,25 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             } else {
                 None
             }
+        })
+    }
+
+    fn point_inside_visible_terminal_grid(&self, x: f32, y: f32) -> bool {
+        self.inner.iter().any(|(&node_id, item)| {
+            if !self.is_node_visible(node_id) {
+                return false;
+            }
+
+            let [left, top, width, height] = item.terminal_rect;
+            let layout = item.val.dimension;
+            let grid_width = (layout.columns as f32 * layout.dimension.width)
+                .min(width)
+                .max(0.0);
+            let grid_height = (layout.lines as f32 * layout.dimension.height)
+                .min(height)
+                .max(0.0);
+
+            x >= left && x < left + grid_width && y >= top && y < top + grid_height
         })
     }
 
@@ -1226,6 +1250,15 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         }
     }
 
+    fn apply_taffy_layout_inactive(&mut self) -> bool {
+        if self.compute_layout().is_err() {
+            return false;
+        }
+
+        self.resize_visible_terminals_to_layout();
+        true
+    }
+
     fn apply_taffy_layout(&mut self, sugarloaf: &mut Sugarloaf) -> bool {
         if self.compute_layout().is_err() {
             return false;
@@ -1682,12 +1715,16 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
         }
     }
 
-    pub fn update_dimensions(&mut self, sugarloaf: &mut Sugarloaf) {
+    pub fn refresh_dimensions_from_sugarloaf(&mut self, sugarloaf: &mut Sugarloaf) {
         for context in self.inner.values_mut() {
             if let Some(layout) = sugarloaf.get_text_layout(&context.val.rich_text_id) {
                 context.val.dimension.update_dimensions(layout.dimensions);
             }
         }
+    }
+
+    pub fn update_dimensions(&mut self, sugarloaf: &mut Sugarloaf) {
+        self.refresh_dimensions_from_sugarloaf(sugarloaf);
 
         // Always apply Taffy layout for consistent positioning
         self.apply_taffy_layout(sugarloaf);
@@ -1703,6 +1740,16 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
         // Apply layout - works for both single and multi-panel
         self.apply_taffy_layout(sugarloaf);
+    }
+
+    /// Resize a hidden tab while keeping PTY geometry synchronized, but avoid
+    /// immediately touching rich-text visibility/bounds or forcing redraw.
+    pub fn resize_inactive(&mut self, new_width: f32, new_height: f32) {
+        self.width = new_width;
+        self.height = new_height;
+
+        let _ = self.try_update_size(new_width, new_height);
+        self.apply_taffy_layout_inactive();
     }
 
     #[inline]

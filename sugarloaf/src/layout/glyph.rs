@@ -57,6 +57,7 @@ pub struct RunData {
     pub size: f32,
     pub glyphs: Vec<GlyphData>,
     pub detailed_glyphs: Vec<Glyph>,
+    pub shaped_glyphs: Vec<crate::font::text_run_cache::ShapedGlyph>,
     pub ascent: f32,
     pub descent: f32,
     pub leading: f32,

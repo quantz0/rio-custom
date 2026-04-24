@@ -159,6 +159,7 @@ impl PositioningTestHelper {
                 x_offset: 0.0,
                 y_offset: 0.0,
                 cluster: i as u32,
+                cell_advance: 1,
             });
         }
 

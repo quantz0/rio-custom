@@ -1132,6 +1132,96 @@ fn test_split_down_terminal_rows_use_panel_content_height() {
 }
 
 #[test]
+fn test_border_hit_does_not_cover_right_panel_first_cell() {
+    let text_dimensions = TextDimensions {
+        width: 10.0,
+        height: 20.0,
+        scale: 1.0,
+    };
+    let dimension =
+        ContextDimension::build(120.0, 100.0, text_dimensions, 1.0, Margin::all(0.0));
+    let mut grid = ContextGrid::new(
+        create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
+        Margin::all(0.0),
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+        rio_backend::config::layout::Panel {
+            margin: Margin::all(0.0),
+            padding: Margin::all(0.0),
+            row_gap: 0.0,
+            column_gap: 0.0,
+            border_width: 2.0,
+            border_radius: 0.0,
+        },
+    );
+
+    let right = grid.try_split_right().unwrap();
+    grid.inner.insert(
+        right,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            2,
+            2,
+            dimension,
+        )),
+    );
+    assert!(grid.apply_taffy_layout_for_tests());
+
+    let right_item = grid.inner.get(&right).unwrap();
+    assert_eq!(right_item.terminal_rect, [60.0, 0.0, 60.0, 100.0]);
+
+    assert!(
+        grid.find_border_at_position(61.0, 10.0).is_none(),
+        "the left side of the right panel's first cell must remain selectable"
+    );
+}
+
+#[test]
+fn test_border_hit_still_works_in_split_gap() {
+    let text_dimensions = TextDimensions {
+        width: 10.0,
+        height: 20.0,
+        scale: 1.0,
+    };
+    let dimension =
+        ContextDimension::build(120.0, 100.0, text_dimensions, 1.0, Margin::all(0.0));
+    let mut grid = ContextGrid::new(
+        create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
+        Margin::all(0.0),
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+        rio_backend::config::layout::Panel {
+            margin: Margin::all(0.0),
+            padding: Margin::all(0.0),
+            row_gap: 0.0,
+            column_gap: 10.0,
+            border_width: 2.0,
+            border_radius: 0.0,
+        },
+    );
+
+    let right = grid.try_split_right().unwrap();
+    grid.inner.insert(
+        right,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            2,
+            2,
+            dimension,
+        )),
+    );
+    assert!(grid.apply_taffy_layout_for_tests());
+
+    let border = grid.find_border_at_position(60.0, 10.0);
+    assert!(matches!(
+        border.map(|border| border.direction),
+        Some(BorderDirection::Vertical)
+    ));
+}
+
+#[test]
 fn test_update_panel_config_refreshes_existing_split_layout() {
     let text_dimensions = TextDimensions {
         width: 10.0,

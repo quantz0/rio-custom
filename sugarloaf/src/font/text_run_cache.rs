@@ -28,6 +28,9 @@ pub struct ShapedGlyph {
     pub x_offset: f32,
     pub y_offset: f32,
     pub cluster: u32,
+    /// Monospace cell advance consumed by this glyph's cluster.
+    /// Only the first glyph of a cluster carries a non-zero value.
+    pub cell_advance: u16,
 }
 
 pub type TextRunKey = u64;

@@ -127,6 +127,10 @@ pub fn calculate_side_by_pos(
     grid_width: f32,
 ) -> Side {
     let x_in_grid = (x as f32 - margin_x).max(0.0);
+    if x_in_grid < cell_width {
+        return Side::Left;
+    }
+
     let cell_x = x_in_grid % cell_width;
     let threshold = cell_width * 0.6;
 
@@ -710,9 +714,16 @@ pub mod test {
             Side::Left,
         );
 
-        // pixel 18 → cell_x = 10.0 >= threshold 9.846 → Right
+        // pixel 18 is still in the first cell, which stays Left so edge text
+        // can be selected from a split/window boundary.
         assert_eq!(
             calculate_side_by_pos(18, margin_x, cell_width, grid_width),
+            Side::Left,
+        );
+
+        // pixel 35 is in the second cell and past its 60% threshold.
+        assert_eq!(
+            calculate_side_by_pos(35, margin_x, cell_width, grid_width),
             Side::Right,
         );
     }
@@ -754,16 +765,23 @@ pub mod test {
             Side::Left,
         );
 
-        // Pixel 50: past the 60% threshold of cell 0
-        // cell_x = (50 - 40) % 16 = 10.0, threshold = 9.6 → Right
+        // Pixel 50: past the old 60% threshold but still inside cell 0,
+        // which stays Left for edge selection.
         assert_eq!(
             calculate_side_by_pos(50, margin_x, cell_width, grid_width),
-            Side::Right,
+            Side::Left,
         );
 
         // Pixel 49: cell_x = 9.0 < threshold 9.6 → Left (was Right at 50%)
         assert_eq!(
             calculate_side_by_pos(49, margin_x, cell_width, grid_width),
+            Side::Left,
+        );
+
+        // Pixel 55 remains in the first cell; edge selections should include
+        // the first cell until the pointer reaches the next cell.
+        assert_eq!(
+            calculate_side_by_pos(55, margin_x, cell_width, grid_width),
             Side::Left,
         );
 

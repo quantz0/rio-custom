@@ -11,6 +11,7 @@
 
 //! RenderData.
 use super::glyph::*;
+use crate::font::text_run_cache::ShapedGlyph;
 #[cfg(test)]
 use crate::font_introspector::shape::cluster::OwnedGlyphCluster;
 use crate::font_introspector::shape::Shaper;
@@ -25,16 +26,35 @@ use wyhash::WyHash;
 /// Compute a cache key from glyph IDs, font_id and size.
 /// Position-independent: same glyphs at different screen positions produce the same key.
 #[inline]
-fn compute_cache_key(glyphs: &[GlyphData], font_id: usize, size: f32) -> u64 {
+fn compute_cache_key(glyphs: &[ShapedGlyph], font_id: usize, size: f32) -> u64 {
     let mut hasher = WyHash::with_seed(0);
     for (i, g) in glyphs.iter().enumerate() {
-        hasher.write_u16(g.simple_data().0);
+        hasher.write_u32(g.glyph_id);
         hasher.write_usize(i);
+        hasher.write_u32(g.x_advance.to_bits());
+        hasher.write_u32(g.y_advance.to_bits());
+        hasher.write_u32(g.x_offset.to_bits());
+        hasher.write_u32(g.y_offset.to_bits());
+        hasher.write_u32(g.cluster);
+        hasher.write_u16(g.cell_advance);
     }
     hasher.write_usize(glyphs.len());
     hasher.write_usize(font_id);
     hasher.write_u32((size * 100.0) as u32);
     hasher.finish()
+}
+
+#[inline]
+fn cluster_cell_advance(
+    content: &str,
+    source: crate::font_introspector::text::cluster::SourceRange,
+) -> u16 {
+    content
+        .get(source.to_range())
+        .map(|text| text.chars().count())
+        .filter(|count| *count > 0)
+        .unwrap_or(1)
+        .min(u16::MAX as usize) as u16
 }
 
 /// Collection of text, organized into lines, runs and clusters.
@@ -93,18 +113,31 @@ impl RenderData {
         size: f32,
         line: u32,
         shaper: Shaper<'_>,
+        content: &str,
         shaping_cache: &mut ShapingCache,
     ) {
         let metrics = shaper.metrics();
 
         let mut glyphs = vec![];
         let mut detailed_glyphs = vec![];
+        let mut shaped_glyphs = vec![];
         let mut advance = 0.;
+        let mut cluster_index = 0u32;
 
         shaper.shape_with(|c| {
             let mut cluster_advance = 0.;
-            for glyph in c.glyphs {
+            let cell_advance = cluster_cell_advance(content, c.source);
+            for (glyph_index, glyph) in c.glyphs.iter().enumerate() {
                 cluster_advance += glyph.advance;
+                shaped_glyphs.push(ShapedGlyph {
+                    glyph_id: glyph.id as u32,
+                    x_advance: glyph.advance,
+                    y_advance: 0.0,
+                    x_offset: glyph.x,
+                    y_offset: glyph.y,
+                    cluster: cluster_index,
+                    cell_advance: if glyph_index == 0 { cell_advance } else { 0 },
+                });
                 const MAX_SIMPLE_ADVANCE: u32 = 0x7FFF;
                 if glyph.x == 0. && glyph.y == 0. {
                     let packed_advance = (glyph.advance * 64.) as u32;
@@ -124,18 +157,20 @@ impl RenderData {
                 });
             }
             advance += cluster_advance;
+            cluster_index += 1;
         });
 
         if let Some(graphic) = style.media {
             self.graphics.insert(graphic.id);
         }
 
-        let cache_key = compute_cache_key(&glyphs, style.font_id, size);
+        let cache_key = compute_cache_key(&shaped_glyphs, style.font_id, size);
 
         // Store pre-packed run in shaping cache
         shaping_cache.finish_with_run(CachedRun {
             glyphs: glyphs.clone(),
             detailed_glyphs: detailed_glyphs.clone(),
+            shaped_glyphs: shaped_glyphs.clone(),
             advance,
             cache_key,
         });
@@ -146,6 +181,7 @@ impl RenderData {
             size,
             detailed_glyphs,
             glyphs,
+            shaped_glyphs,
             ascent: metrics.ascent,
             descent: metrics.descent,
             leading: metrics.leading,
@@ -180,6 +216,7 @@ impl RenderData {
             size,
             glyphs: cached.glyphs.clone(),
             detailed_glyphs: cached.detailed_glyphs.clone(),
+            shaped_glyphs: cached.shaped_glyphs.clone(),
             ascent,
             descent,
             leading,
@@ -199,6 +236,7 @@ impl RenderData {
         style: SpanStyle,
         size: f32,
         line: u32,
+        content: &str,
         glyph_clusters: &Vec<OwnedGlyphCluster>,
         metrics: &Metrics,
     ) -> bool {
@@ -207,11 +245,22 @@ impl RenderData {
         let mut advance = 0.;
         let mut glyphs = vec![];
         let mut detailed_glyphs = vec![];
+        let mut shaped_glyphs = vec![];
 
-        for c in glyph_clusters {
+        for (cluster_index, c) in glyph_clusters.iter().enumerate() {
             let mut cluster_advance = 0.;
-            for glyph in &c.glyphs {
+            let cell_advance = cluster_cell_advance(content, c.source);
+            for (glyph_index, glyph) in c.glyphs.iter().enumerate() {
                 cluster_advance += glyph.advance;
+                shaped_glyphs.push(ShapedGlyph {
+                    glyph_id: glyph.id as u32,
+                    x_advance: glyph.advance,
+                    y_advance: 0.0,
+                    x_offset: glyph.x,
+                    y_offset: glyph.y,
+                    cluster: cluster_index as u32,
+                    cell_advance: if glyph_index == 0 { cell_advance } else { 0 },
+                });
                 const MAX_SIMPLE_ADVANCE: u32 = 0x7FFF;
                 if glyph.x == 0. && glyph.y == 0. {
                     let packed_advance = (glyph.advance * 64.) as u32;
@@ -237,13 +286,14 @@ impl RenderData {
         if let Some(graphic) = style.media {
             self.graphics.insert(graphic.id);
         }
-        let cache_key = compute_cache_key(&glyphs, style.font_id, size);
+        let cache_key = compute_cache_key(&shaped_glyphs, style.font_id, size);
         let run_data = RunData {
             span: style,
             line,
             size,
             detailed_glyphs,
             glyphs,
+            shaped_glyphs,
             ascent: metrics.ascent,
             descent: metrics.descent,
             leading: metrics.leading,
@@ -273,6 +323,7 @@ impl RenderData {
             size,
             detailed_glyphs: vec![],
             glyphs: vec![],
+            shaped_glyphs: vec![],
             ascent: metrics.ascent,
             descent: metrics.descent,
             leading: metrics.leading,
