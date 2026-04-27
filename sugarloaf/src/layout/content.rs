@@ -587,7 +587,8 @@ impl Content {
         let fallback_width = scaled_font_size.max(1.0);
         let fallback_height = (scaled_font_size * layout.line_height).max(1.0);
 
-        if let Some(mut font_library_data) = self.fonts.inner.try_write() {
+        let mut font_library_data = self.fonts.inner.write();
+        {
             let font_id = 0; // FONT_ID_REGULAR
 
             // `get_font_metrics` already returns the ceiled terminal cell
@@ -652,12 +653,6 @@ impl Content {
                 height: line_height_physical,
                 scale,
             };
-        }
-
-        crate::layout::TextDimensions {
-            width: fallback_width,
-            height: fallback_height,
-            scale,
         }
     }
 
@@ -1107,6 +1102,15 @@ impl Content {
             // Only allocate vars on the miss path
             let vars: Vec<_> = vars.to_vec();
 
+            let normalized_metrics = if font_id == 0 {
+                metrics_result
+            } else {
+                fonts
+                    .inner
+                    .write()
+                    .get_font_metrics(&font_id, scaled_font_size)
+            };
+
             let font_library = &fonts.inner.read();
             if let Some((shared_data, offset, key)) = font_library.get_data(&font_id) {
                 let font_ref = FontRef {
@@ -1131,6 +1135,7 @@ impl Content {
                     shaper,
                     content,
                     shaping_cache,
+                    normalized_metrics,
                 );
             }
         }
@@ -1561,6 +1566,8 @@ mod tests {
     use crate::font::FontLibrary;
     use crate::font_introspector::shape::cluster::{Glyph, OwnedGlyphCluster};
     use crate::font_introspector::text::cluster::SourceRange;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     const TEST_FONT_SIZE: f32 = 16.0;
     const TEST_SCRIPT: Script = Script::Latin;
@@ -1706,6 +1713,97 @@ mod tests {
             expected_height
         );
         assert!(dimensions.width > 0.0);
+    }
+
+    #[test]
+    fn character_cell_dimensions_waits_for_font_metrics_when_lock_is_busy() {
+        let font_library = FontLibrary::default();
+        let content = Content::new(&font_library);
+        let layout = TextLayout {
+            line_height: 1.25,
+            font_size: 18.0,
+            original_font_size: 18.0,
+            dimensions: crate::layout::TextDimensions {
+                width: 0.0,
+                height: 0.0,
+                scale: 1.5,
+            },
+        };
+        let scaled_font_size = layout.font_size * layout.dimensions.scale;
+        let fallback_height = scaled_font_size * layout.line_height;
+        let expected_height = {
+            let mut font_library_data = font_library.inner.write();
+            font_library_data
+                .get_font_metrics(&0, scaled_font_size)
+                .map(|(ascent, descent, leading)| {
+                    ((ascent + descent + leading).ceil() * layout.line_height).max(1.0)
+                })
+                .unwrap()
+        };
+
+        assert!(
+            (expected_height - fallback_height).abs() > f32::EPSILON,
+            "test must distinguish real font metrics from fallback height"
+        );
+
+        let (lock_held_tx, lock_held_rx) = mpsc::channel();
+        let fonts = font_library.inner.clone();
+        let lock_holder = std::thread::spawn(move || {
+            let _guard = fonts.read();
+            lock_held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        });
+        lock_held_rx.recv().unwrap();
+
+        let dimensions = content.calculate_character_cell_dimensions(&layout);
+
+        lock_holder.join().unwrap();
+        assert!(
+            (dimensions.height - expected_height).abs() < f32::EPSILON,
+            "busy font lock must not fall back to font_size-derived height: got {}, expected {}",
+            dimensions.height,
+            expected_height
+        );
+    }
+
+    #[test]
+    fn cache_miss_run_uses_font_library_grid_metrics() {
+        let font_library = FontLibrary::default();
+        let mut content = Content::new(&font_library);
+        let text_id = 7;
+        let layout = TextLayout {
+            line_height: 1.25,
+            font_size: 18.0,
+            original_font_size: 18.0,
+            dimensions: crate::layout::TextDimensions {
+                width: 0.0,
+                height: 0.0,
+                scale: 1.5,
+            },
+        };
+        let scaled_font_size = layout.font_size * layout.dimensions.scale;
+        let expected = {
+            let mut font_library_data = font_library.inner.write();
+            font_library_data
+                .get_font_metrics(&0, scaled_font_size)
+                .unwrap()
+        };
+
+        content.set_text(text_id, &layout);
+        content
+            .get_state_mut(&text_id)
+            .unwrap()
+            .add_span("A", SpanStyle::default());
+        content.sel(text_id);
+        content.build();
+
+        let text_state = content.get_state(&text_id).unwrap();
+        let run = &text_state.lines[0].render_data.runs[0];
+        assert_eq!(
+            (run.ascent, run.descent, run.leading),
+            expected,
+            "cache-miss shaping path must use the same grid metrics as cache hits"
+        );
     }
 
     #[test]

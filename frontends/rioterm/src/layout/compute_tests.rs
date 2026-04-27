@@ -1132,6 +1132,72 @@ fn test_split_down_terminal_rows_use_panel_content_height() {
 }
 
 #[test]
+fn test_updated_top_margin_reduces_split_root_height() {
+    let text_dimensions = TextDimensions {
+        width: 8.4,
+        height: 19.0,
+        scale: 1.0,
+    };
+    let initial_margin = Margin::new(4.0, 4.0, 4.0, 4.0);
+    let dimension =
+        ContextDimension::build(1920.0, 1009.0, text_dimensions, 1.0, initial_margin);
+    let panel_config = rio_backend::config::layout::Panel {
+        margin: Margin::all(2.0),
+        padding: Margin::all(5.0),
+        row_gap: 4.0,
+        column_gap: 4.0,
+        border_width: 2.0,
+        border_radius: 0.0,
+    };
+    let mut grid = ContextGrid::new(
+        create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
+        initial_margin,
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+        panel_config,
+    );
+
+    let bottom = grid.try_split_down().unwrap();
+    grid.inner.insert(
+        bottom,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            2,
+            2,
+            dimension,
+        )),
+    );
+    grid.apply_taffy_layout_for_tests();
+
+    grid.update_scaled_margin(Margin::new(36.0, 4.0, 4.0, 4.0));
+    grid.apply_taffy_layout_for_tests();
+
+    for item in grid.inner.values() {
+        let layout_bottom = item.layout_rect[1] + item.layout_rect[3];
+        let terminal_bottom = item.terminal_rect[1] + item.terminal_rect[3];
+
+        assert!(
+            grid.scaled_margin.top + layout_bottom <= grid.height - grid.scaled_margin.bottom,
+            "layout bottom {} plus top margin {} must fit within window height {} minus bottom margin {}",
+            layout_bottom,
+            grid.scaled_margin.top,
+            grid.height,
+            grid.scaled_margin.bottom,
+        );
+        assert!(
+            grid.scaled_margin.top + terminal_bottom
+                <= grid.height - grid.scaled_margin.bottom,
+            "terminal bottom {} plus top margin {} must fit within window height {} minus bottom margin {}",
+            terminal_bottom,
+            grid.scaled_margin.top,
+            grid.height,
+            grid.scaled_margin.bottom,
+        );
+    }
+}
+
+#[test]
 fn test_border_hit_does_not_cover_right_panel_first_cell() {
     let text_dimensions = TextDimensions {
         width: 10.0,

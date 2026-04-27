@@ -582,9 +582,55 @@ impl<U: EventListener> Crosswords<U> {
         TermDamage::Partial(TermDamageIterator::new(&self.damage.lines, display_offset))
     }
 
+    /// Extract damage for the frontend renderer.
+    ///
+    /// Unlike `peek_damage_event`, this updates cursor tracking at the same
+    /// time the renderer snapshots the grid. The renderer resets the line/full
+    /// flags after consuming the returned damage.
+    pub fn damage_event(&mut self) -> Option<TerminalDamage> {
+        if self.mode.contains(Mode::INSERT) {
+            self.mark_fully_damaged();
+        }
+
+        let previous_cursor =
+            mem::replace(&mut self.damage.last_cursor, self.grid.cursor.pos);
+
+        if self.damage.full {
+            return Some(TerminalDamage::Full);
+        }
+
+        if previous_cursor != self.grid.cursor.pos {
+            self.damage_visible_line(previous_cursor.row);
+            self.damage_visible_line(self.grid.cursor.pos.row);
+        }
+
+        let damaged_lines: BTreeSet<LineDamage> = self
+            .damage
+            .lines
+            .iter()
+            .filter(|line| line.is_damaged())
+            .map(|line| LineDamage::new(line.line, true))
+            .collect();
+
+        if damaged_lines.is_empty() {
+            None
+        } else {
+            Some(TerminalDamage::Partial(damaged_lines))
+        }
+    }
+
+    #[inline]
+    fn damage_visible_line(&mut self, line: Line) {
+        if line.0 >= 0 {
+            let line = line.0 as usize;
+            if line < self.damage.lines.len() {
+                self.damage.damage_line(line);
+            }
+        }
+    }
+
     /// Peek damage event based on current damage state
     pub fn peek_damage_event(&self) -> Option<TerminalDamage> {
-        let display_offset = self.grid.display_offset();
         if self.damage.full {
             Some(TerminalDamage::Full)
         } else {
@@ -594,7 +640,7 @@ impl<U: EventListener> Crosswords<U> {
                 .lines
                 .iter()
                 .filter(|line| line.is_damaged())
-                .map(|line| LineDamage::new(line.line + display_offset, true))
+                .map(|line| LineDamage::new(line.line, true))
                 .collect();
 
             if damaged_lines.is_empty() {
@@ -2544,6 +2590,7 @@ impl<U: EventListener> Handler for Crosswords<U> {
                 cell.set_extras_id(Some(id));
                 cell.insert_cell_flag(CellFlags::GRAPHEME);
             }
+            self.damage.damage_line(row.0 as usize);
             return;
         }
 
@@ -2976,6 +3023,8 @@ impl<U: EventListener> Handler for Crosswords<U> {
             return;
         }
 
+        let line = self.grid.cursor.pos.row.0 as usize;
+        let original_count = count;
         while self.grid.cursor.pos.col < self.grid.columns() && count != 0 {
             count -= 1;
 
@@ -2996,6 +3045,10 @@ impl<U: EventListener> Handler for Crosswords<U> {
                     break;
                 }
             }
+        }
+
+        if original_count != 0 {
+            self.damage.damage_line(line);
         }
     }
 
@@ -4517,6 +4570,127 @@ mod tests {
     }
 
     #[test]
+    fn damage_event_consumes_cursor_state_after_render() {
+        let size = CrosswordsSize::new(80, 24);
+        let window_id = crate::event::WindowId::from(0);
+        let mut cw = Crosswords::new(
+            size,
+            CursorShape::Block,
+            VoidListener {},
+            window_id,
+            0,
+            10_000,
+        );
+
+        assert_eq!(cw.damage_event(), Some(TerminalDamage::Full));
+        cw.reset_damage();
+
+        cw.input('A');
+        let damage = cw.damage_event();
+        assert!(matches!(damage, Some(TerminalDamage::Partial(_))));
+        cw.reset_damage();
+
+        assert_eq!(cw.damage_event(), None);
+    }
+
+    #[test]
+    fn damage_event_includes_cursor_lines_without_existing_line_damage() {
+        let size = CrosswordsSize::new(80, 24);
+        let window_id = crate::event::WindowId::from(0);
+        let mut cw = Crosswords::new(
+            size,
+            CursorShape::Block,
+            VoidListener {},
+            window_id,
+            0,
+            10_000,
+        );
+
+        assert_eq!(cw.damage_event(), Some(TerminalDamage::Full));
+        cw.reset_damage();
+
+        cw.grid.cursor.pos = Pos::new(Line(2), Column(0));
+
+        let damage = cw.damage_event();
+        match damage {
+            Some(TerminalDamage::Partial(lines)) => {
+                assert!(lines.contains(&LineDamage::new(0, true)));
+                assert!(lines.contains(&LineDamage::new(2, true)));
+            }
+            other => panic!("expected partial cursor-line damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_event_uses_visible_line_indices_when_scrolled() {
+        let size = CrosswordsSize::new(80, 3);
+        let window_id = crate::event::WindowId::from(0);
+        let mut cw = Crosswords::new(
+            size,
+            CursorShape::Block,
+            VoidListener {},
+            window_id,
+            0,
+            10_000,
+        );
+
+        for _ in 0..5 {
+            cw.linefeed();
+        }
+
+        cw.scroll_display(Scroll::Delta(1));
+        assert_eq!(cw.display_offset(), 1);
+
+        assert_eq!(cw.damage_event(), Some(TerminalDamage::Full));
+        cw.reset_damage();
+        cw.damage_line(1);
+
+        let damage = cw.damage_event();
+        match damage {
+            Some(TerminalDamage::Partial(lines)) => {
+                assert!(lines.contains(&LineDamage::new(1, true)));
+                assert!(!lines.contains(&LineDamage::new(2, true)));
+            }
+            other => panic!("expected partial viewport-line damage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn combining_input_marks_line_damaged() {
+        let size = CrosswordsSize::new(80, 24);
+        let window_id = crate::event::WindowId::from(0);
+        let mut cw = Crosswords::new(
+            size,
+            CursorShape::Block,
+            VoidListener {},
+            window_id,
+            0,
+            10_000,
+        );
+
+        assert_eq!(cw.damage_event(), Some(TerminalDamage::Full));
+        cw.reset_damage();
+
+        cw.input('e');
+        assert!(matches!(
+            cw.damage_event(),
+            Some(TerminalDamage::Partial(_))
+        ));
+        cw.reset_damage();
+
+        cw.input('\u{0301}');
+
+        let damage = cw.damage_event();
+        match damage {
+            Some(TerminalDamage::Partial(lines)) => {
+                assert!(lines.contains(&LineDamage::new(0, true)));
+            }
+            other => panic!("expected combining character line damage, got {other:?}"),
+        }
+        assert!(cw.grid[Line(0)][Column(0)].extras_id().is_some());
+    }
+
+    #[test]
     fn test_damage_tracking_cursor_movement() {
         let size = CrosswordsSize::new(80, 24);
         let window_id = crate::event::WindowId::from(0);
@@ -5456,7 +5630,11 @@ mod tests {
             RioEvent::ColorRequest(event_route_id, index, format) => {
                 assert_eq!(*event_route_id, route_id);
                 assert_eq!(*index, NamedColor::Foreground as usize);
-                let response = format(ColorRgb::new(0xff, 0xff, 0xff));
+                let response = format(ColorRgb {
+                    r: 0xff,
+                    g: 0xff,
+                    b: 0xff,
+                });
                 assert_eq!(response, "\x1b]10;rgb:ffff/ffff/ffff\x1b\\");
             }
             other => panic!("Expected ColorRequest event, got {:?}", other),

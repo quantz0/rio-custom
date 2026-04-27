@@ -1332,13 +1332,14 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
                 continue;
             }
 
-            let [abs_x, abs_y, width, height] = item.terminal_rect;
+            let [abs_x, abs_y, _, _] = item.terminal_rect;
             let x = (abs_x + self.scaled_margin.left) / scale;
             let y = (abs_y + self.scaled_margin.top) / scale;
 
             sugarloaf.set_position(rich_text_id, x, y);
 
             if is_multi_panel {
+                let [abs_x, abs_y, width, height] = item.terminal_rect;
                 let bounds_x = abs_x + self.scaled_margin.left;
                 let bounds_y = abs_y + self.scaled_margin.top;
                 sugarloaf
@@ -1658,6 +1659,7 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
 
     pub fn update_scaled_margin(&mut self, scaled_margin: Margin) {
         self.scaled_margin = scaled_margin;
+        let _ = self.try_update_size(self.width, self.height);
     }
 
     pub fn update_scale(&mut self, scale: f32) {

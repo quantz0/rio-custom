@@ -1746,6 +1746,9 @@ impl Screen<'_> {
                 s.line_height = layout.line_height;
 
                 let scale = self.sugarloaf.scale_factor();
+                let window_size = self.sugarloaf.window_size();
+                let width = window_size.width as f32;
+                let height = window_size.height as f32;
                 let d = self.context_manager.current_grid_mut();
                 d.update_scaled_margin(Margin::new(
                     padding_y_top * scale,
@@ -1753,6 +1756,7 @@ impl Screen<'_> {
                     padding_y_bottom * scale,
                     d.scaled_margin.left,
                 ));
+                d.resize(width, height, &mut self.sugarloaf);
                 self.resize_all_contexts();
             }
         }

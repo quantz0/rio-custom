@@ -57,6 +57,19 @@ fn cluster_cell_advance(
         .min(u16::MAX as usize) as u16
 }
 
+fn apply_normalized_metrics(
+    mut metrics: Metrics,
+    normalized_metrics: Option<(f32, f32, f32)>,
+) -> Metrics {
+    if let Some((ascent, descent, leading)) = normalized_metrics {
+        metrics.ascent = ascent;
+        metrics.descent = descent;
+        metrics.leading = leading;
+    }
+
+    metrics
+}
+
 /// Collection of text, organized into lines, runs and clusters.
 #[derive(Clone, Debug, Default)]
 pub struct RenderData {
@@ -115,8 +128,9 @@ impl RenderData {
         shaper: Shaper<'_>,
         content: &str,
         shaping_cache: &mut ShapingCache,
+        normalized_metrics: Option<(f32, f32, f32)>,
     ) {
-        let metrics = shaper.metrics();
+        let metrics = apply_normalized_metrics(shaper.metrics(), normalized_metrics);
 
         let mut glyphs = vec![];
         let mut detailed_glyphs = vec![];
@@ -406,5 +420,34 @@ impl Run<'_> {
     #[inline]
     pub fn decoration_color(&self) -> Option<[f32; 4]> {
         self.run.span.decoration_color
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalized_metrics_override_shaper_line_box() {
+        let metrics = Metrics {
+            ascent: 10.0,
+            descent: 4.0,
+            leading: 2.0,
+            underline_offset: -1.5,
+            strikeout_offset: 6.0,
+            stroke_size: 1.0,
+            x_height: 7.0,
+            ..Default::default()
+        };
+
+        let normalized = apply_normalized_metrics(metrics, Some((13.0, 5.0, 0.0)));
+
+        assert_eq!(normalized.ascent, 13.0);
+        assert_eq!(normalized.descent, 5.0);
+        assert_eq!(normalized.leading, 0.0);
+        assert_eq!(normalized.underline_offset, metrics.underline_offset);
+        assert_eq!(normalized.strikeout_offset, metrics.strikeout_offset);
+        assert_eq!(normalized.stroke_size, metrics.stroke_size);
+        assert_eq!(normalized.x_height, metrics.x_height);
     }
 }

@@ -29,7 +29,7 @@ use rio_backend::config::Config;
 use rio_backend::event::EventProxy;
 use rio_backend::sugarloaf::font_introspector::Attributes;
 use rio_backend::sugarloaf::{
-    drawable_character, is_private_user_area, CursorKind, Graphic, SpanStyle,
+    drawable_character, is_private_user_area, Content, CursorKind, Graphic, SpanStyle,
     SpanStyleDecoration, Stretch, Style, SugarCursor, Sugarloaf, UnderlineInfo,
     UnderlineShape, Weight,
 };
@@ -126,6 +126,52 @@ fn pua_constraint_width(row: &Row<Square>, col: usize, cols: usize) -> f32 {
 
     // Next cell is occupied -> constrain to 1 cell
     1.0
+}
+
+fn push_text_span(
+    builder: &mut Content,
+    line_opt: Option<usize>,
+    content: &str,
+    style: SpanStyle,
+) {
+    if let Some(line) = line_opt {
+        builder.add_span_on_line(line, content, style);
+    } else {
+        builder.add_span(content, style);
+    }
+}
+
+fn push_rect_span(
+    builder: &mut Content,
+    line_opt: Option<usize>,
+    width: f32,
+    mut style: SpanStyle,
+) {
+    style.width = width;
+    if let Some(line) = line_opt {
+        builder.add_span_as_rect_on_line(line, style);
+    } else {
+        builder.add_span_as_rect(style);
+    }
+}
+
+fn flush_pending_row_spans(
+    builder: &mut Content,
+    line_opt: Option<usize>,
+    content: &mut String,
+    last_style: SpanStyle,
+    pending_blank_width: &mut f32,
+    pending_blank_style: SpanStyle,
+) {
+    if !content.is_empty() {
+        push_text_span(builder, line_opt, content, last_style);
+        content.clear();
+    }
+
+    if *pending_blank_width > 0.0 {
+        push_rect_span(builder, line_opt, *pending_blank_width, pending_blank_style);
+        *pending_blank_width = 0.0;
+    }
 }
 
 impl Renderer {
@@ -618,7 +664,7 @@ impl Renderer {
         let mut pending_blank_width: f32 = 0.0;
         let mut pending_blank_style = SpanStyle::default();
 
-        for (style, square_content, column) in styles_and_chars {
+        for (style, square_content, _column) in styles_and_chars {
             // Cells carrying a graphic (sixel/iTerm2/Kitty) must go
             // through the normal text path so the renderer paints
             // their image. They are NOT blank — even when their
@@ -701,31 +747,16 @@ impl Renderer {
                 };
                 content.push(push_char);
             }
-
-            // Render last column and break row
-            if column == (columns - 1) {
-                if !content.is_empty() {
-                    if let Some(line) = line_opt {
-                        builder.add_span_on_line(line, &content, last_style);
-                    } else {
-                        builder.add_span(&content, last_style);
-                    }
-                }
-
-                // Flush any remaining pending blank cells
-                if pending_blank_width > 0.0 {
-                    let mut rect_style = pending_blank_style;
-                    rect_style.width = pending_blank_width;
-                    if let Some(line) = line_opt {
-                        builder.add_span_as_rect_on_line(line, rect_style);
-                    } else {
-                        builder.add_span_as_rect(rect_style);
-                    }
-                }
-
-                break;
-            }
         }
+
+        flush_pending_row_spans(
+            builder,
+            line_opt,
+            &mut content,
+            last_style,
+            &mut pending_blank_width,
+            pending_blank_style,
+        );
 
         if let Some(line) = line_opt {
             builder.build_line(line);
@@ -1031,7 +1062,7 @@ impl Renderer {
                 // Clear in-flight flag so PTY thread can notify again
                 terminal.damage_event_in_flight = false;
 
-                let pty_damage = terminal.peek_damage_event();
+                let pty_damage = terminal.damage_event();
 
                 let damage = if force_full_damage {
                     TerminalDamage::Full
@@ -1661,6 +1692,8 @@ impl Renderer {
 mod tests {
     use super::*;
     use rio_backend::crosswords::pos::{Column, Line, Pos};
+    use rio_backend::sugarloaf::font::FontLibrary;
+    use rio_backend::sugarloaf::layout::TextLayout;
 
     #[test]
     fn test_is_position_in_hint_matches() {
@@ -1809,6 +1842,32 @@ mod tests {
             row[Column(i)].set_c(ch);
         }
         row
+    }
+
+    #[test]
+    fn flush_pending_row_spans_commits_text_after_trailing_spacer_is_skipped() {
+        let font_library = FontLibrary::default();
+        let mut content = Content::new(&font_library);
+        let text_id = 42;
+        content.set_text(text_id, &TextLayout::default());
+        content.sel(text_id).new_line();
+
+        let mut pending_text = String::from("界");
+        let mut pending_blank_width = 0.0;
+        flush_pending_row_spans(
+            &mut content,
+            Some(0),
+            &mut pending_text,
+            SpanStyle::default(),
+            &mut pending_blank_width,
+            SpanStyle::default(),
+        );
+
+        let text_state = content.get_state(&text_id).unwrap();
+        assert_eq!(text_state.lines[0].text_buffer, "界");
+        assert_eq!(text_state.lines[0].fragments.len(), 1);
+        assert!(pending_text.is_empty());
+        assert_eq!(pending_blank_width, 0.0);
     }
 
     // PUA icon = U+F115 (Nerd Font file icon)
