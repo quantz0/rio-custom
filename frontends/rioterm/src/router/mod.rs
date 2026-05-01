@@ -64,37 +64,23 @@ impl Route<'_> {
         self.window.winit_window.request_redraw();
     }
 
+    /// Mark the active context dirty (UI-only) and request a redraw
+    /// at the next vsync. Used by overlay input paths (command palette,
+    /// assistant, island rename) where the UI changed but terminal
+    /// cells didn't. `set_dirty` passes `Renderer::run`'s per-context
+    /// gate; the inner damage match hits
+    /// `(None, None) => TerminalDamage::Noop` so rows don't rebuild,
+    /// and the overlay itself is drawn unconditionally after the loop.
     #[inline]
-    pub fn schedule_redraw(
-        &mut self,
-        scheduler: &mut crate::scheduler::Scheduler,
-        route_id: usize,
-    ) {
-        #[cfg(target_os = "macos")]
-        {
-            // On macOS, use direct redraw as CVDisplayLink handles VSync
-            let _ = (scheduler, route_id); // Suppress warnings
-            self.request_redraw();
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            use crate::event::{EventPayload, RioEvent, RioEventType};
-            use crate::scheduler::{TimerId, Topic};
-
-            // Windows and Linux use the frame scheduler with refresh rate timing
-            let timer_id = TimerId::new(Topic::Render, route_id);
-            let event = EventPayload::new(
-                RioEventType::Rio(RioEvent::Render),
-                self.window.winit_window.id(),
-            );
-
-            // Schedule a render if not already scheduled
-            // Use vblank_interval for proper frame timing
-            if !scheduler.scheduled(timer_id) {
-                scheduler.schedule(event, self.window.vblank_interval, false, timer_id);
-            }
-        }
+    pub fn request_overlay_redraw(&mut self) {
+        self.window
+            .screen
+            .ctx_mut()
+            .current_mut()
+            .renderable_content
+            .pending_update
+            .set_dirty();
+        self.request_redraw();
     }
 
     #[inline]
@@ -176,7 +162,7 @@ impl Route<'_> {
                     clipboard,
                 );
                 if consumed {
-                    self.window.screen.render();
+                    self.request_overlay_redraw();
                     return true;
                 }
             }
@@ -192,7 +178,7 @@ impl Route<'_> {
                             .renderer
                             .command_palette
                             .set_enabled(false);
-                        self.window.screen.render();
+                        self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::ArrowUp) => {
                         self.window
@@ -200,7 +186,7 @@ impl Route<'_> {
                             .renderer
                             .command_palette
                             .move_selection_up();
-                        self.window.screen.render();
+                        self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::ArrowDown) => {
                         self.window
@@ -208,7 +194,7 @@ impl Route<'_> {
                             .renderer
                             .command_palette
                             .move_selection_down();
-                        self.window.screen.render();
+                        self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::Tab) => {
                         self.window
@@ -216,7 +202,7 @@ impl Route<'_> {
                             .renderer
                             .command_palette
                             .move_selection_down();
-                        self.window.screen.render();
+                        self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::Enter) => {
                         // Snapshot what the palette wants to do FIRST,
@@ -251,7 +237,7 @@ impl Route<'_> {
                                 .renderer
                                 .command_palette
                                 .set_enabled(false);
-                            self.window.screen.render();
+                            self.request_overlay_redraw();
                             return true;
                         }
 
@@ -290,7 +276,7 @@ impl Route<'_> {
                                     .set_enabled(false);
                             }
                         }
-                        self.window.screen.render();
+                        self.request_overlay_redraw();
                     }
                     Key::Named(NamedKey::Backspace) => {
                         let current_query =
@@ -303,7 +289,7 @@ impl Route<'_> {
                                 .renderer
                                 .command_palette
                                 .set_query(chars.into_iter().collect());
-                            self.window.screen.render();
+                            self.request_overlay_redraw();
                         }
                     }
                     _ => {
@@ -325,7 +311,7 @@ impl Route<'_> {
                                     .renderer
                                     .command_palette
                                     .set_query(format!("{}{}", current_query, text_str));
-                                self.window.screen.render();
+                                self.request_overlay_redraw();
                             }
                         }
                     }
@@ -345,7 +331,7 @@ impl Route<'_> {
             if is_enter {
                 self.assistant.clear();
                 self.window.screen.renderer.assistant.clear();
-                self.window.screen.render();
+                self.request_overlay_redraw();
             }
             return true;
         }
@@ -815,9 +801,8 @@ fn compute_window_size_from_grid(
                 + panel.margin.left
                 + panel.margin.right)
                 * scale;
-            let raw = (columns as f32 * dim.dimension.width).ceil() as u32
-                + margin as u32
-                + panel_edge as u32;
+            let raw =
+                columns as u32 * dim.cell.cell_width + margin as u32 + panel_edge as u32;
             raw.next_multiple_of(scale_u32)
         }
         _ => window_size.width,
@@ -831,9 +816,8 @@ fn compute_window_size_from_grid(
                 + panel.margin.top
                 + panel.margin.bottom)
                 * scale;
-            let raw = (rows as f32 * dim.dimension.height).ceil() as u32
-                + margin as u32
-                + panel_edge as u32;
+            let raw =
+                rows as u32 * dim.cell.cell_height + margin as u32 + panel_edge as u32;
             raw.next_multiple_of(scale_u32)
         }
         _ => window_size.height,
@@ -862,6 +846,17 @@ mod grid_size_tests {
                 width,
                 height,
                 scale,
+            },
+            // Canonical cell stride matches the dims so router math
+            // (`cols * cell_width`) lines up with what the test
+            // labels imply.
+            cell: rio_backend::sugarloaf::layout::CellMetrics {
+                cell_width: width.round().max(1.0) as u32,
+                cell_height: height.round().max(1.0) as u32,
+                cell_baseline: 0,
+                face_width: width as f64,
+                face_height: height as f64,
+                face_y: 0.0,
             },
             margin,
             ..Default::default()
@@ -948,8 +943,9 @@ mod grid_size_tests {
     #[test]
     fn rounds_up_on_hidpi() {
         let dim = make_dim(16.41, 33.0, 2.0, Margin::all(0.0));
-        // 80 * 16.41 = 1312.8 → ceil = 1313, next_multiple_of(2) = 1314
-        // 24 * 33.0 = 792, next_multiple_of(2) = 792
+        // Canonical cell stride: round(16.41) = 16, round(33.0) = 33.
+        // 80 * 16 = 1280, next_multiple_of(2) = 1280
+        // 24 * 33 = 792,  next_multiple_of(2) = 792
         assert_eq!(
             compute_window_size_from_grid(
                 Some(80),
@@ -958,7 +954,7 @@ mod grid_size_tests {
                 &dim,
                 win(1000, 600)
             ),
-            (1314, 792)
+            (1280, 792)
         );
     }
 

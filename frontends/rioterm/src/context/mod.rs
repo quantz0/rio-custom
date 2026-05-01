@@ -1309,11 +1309,20 @@ pub mod test {
             height: 20.0,
             scale: 1.0,
         };
+        let cell = rio_backend::sugarloaf::layout::CellMetrics {
+            cell_width: 10,
+            cell_height: 20,
+            cell_baseline: 0,
+            face_width: 10.0,
+            face_height: 20.0,
+            face_y: 0.0,
+        };
 
         context_manager.current_mut().dimension = ContextDimension::build(
             1160.0,
             730.0,
             text_dimensions,
+            cell,
             1.0,
             Margin::default(),
         );

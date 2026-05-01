@@ -11,63 +11,29 @@
 
 //! RenderData.
 use super::glyph::*;
-use crate::font::text_run_cache::ShapedGlyph;
-#[cfg(test)]
-use crate::font_introspector::shape::cluster::OwnedGlyphCluster;
-use crate::font_introspector::shape::Shaper;
-use crate::font_introspector::Metrics;
 use crate::layout::content::{CachedRun, ShapingCache, SpanStyleDecoration};
 use crate::layout::SpanStyle;
 use crate::sugarloaf::primitives::SugarCursor;
 use crate::{Graphic, GraphicId};
 use std::hash::Hasher;
+#[cfg(not(target_os = "macos"))]
+use swash::shape::Shaper;
+use swash::Metrics;
 use wyhash::WyHash;
 
 /// Compute a cache key from glyph IDs, font_id and size.
 /// Position-independent: same glyphs at different screen positions produce the same key.
 #[inline]
-fn compute_cache_key(glyphs: &[ShapedGlyph], font_id: usize, size: f32) -> u64 {
+fn compute_cache_key(glyphs: &[GlyphData], font_id: usize, size: f32) -> u64 {
     let mut hasher = WyHash::with_seed(0);
     for (i, g) in glyphs.iter().enumerate() {
-        hasher.write_u32(g.glyph_id);
+        hasher.write_u16(g.simple_data().0);
         hasher.write_usize(i);
-        hasher.write_u32(g.x_advance.to_bits());
-        hasher.write_u32(g.y_advance.to_bits());
-        hasher.write_u32(g.x_offset.to_bits());
-        hasher.write_u32(g.y_offset.to_bits());
-        hasher.write_u32(g.cluster);
-        hasher.write_u16(g.cell_advance);
     }
     hasher.write_usize(glyphs.len());
     hasher.write_usize(font_id);
     hasher.write_u32((size * 100.0) as u32);
     hasher.finish()
-}
-
-#[inline]
-fn cluster_cell_advance(
-    content: &str,
-    source: crate::font_introspector::text::cluster::SourceRange,
-) -> u16 {
-    content
-        .get(source.to_range())
-        .map(|text| text.chars().count())
-        .filter(|count| *count > 0)
-        .unwrap_or(1)
-        .min(u16::MAX as usize) as u16
-}
-
-fn apply_normalized_metrics(
-    mut metrics: Metrics,
-    normalized_metrics: Option<(f32, f32, f32)>,
-) -> Metrics {
-    if let Some((ascent, descent, leading)) = normalized_metrics {
-        metrics.ascent = ascent;
-        metrics.descent = descent;
-        metrics.leading = leading;
-    }
-
-    metrics
 }
 
 /// Collection of text, organized into lines, runs and clusters.
@@ -119,6 +85,7 @@ impl RenderData {
 }
 
 impl RenderData {
+    #[cfg(not(target_os = "macos"))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_run(
         &mut self,
@@ -126,32 +93,18 @@ impl RenderData {
         size: f32,
         line: u32,
         shaper: Shaper<'_>,
-        content: &str,
         shaping_cache: &mut ShapingCache,
-        normalized_metrics: Option<(f32, f32, f32)>,
     ) {
-        let metrics = apply_normalized_metrics(shaper.metrics(), normalized_metrics);
+        let metrics = shaper.metrics();
 
         let mut glyphs = vec![];
         let mut detailed_glyphs = vec![];
-        let mut shaped_glyphs = vec![];
         let mut advance = 0.;
-        let mut cluster_index = 0u32;
 
         shaper.shape_with(|c| {
             let mut cluster_advance = 0.;
-            let cell_advance = cluster_cell_advance(content, c.source);
-            for (glyph_index, glyph) in c.glyphs.iter().enumerate() {
+            for glyph in c.glyphs {
                 cluster_advance += glyph.advance;
-                shaped_glyphs.push(ShapedGlyph {
-                    glyph_id: glyph.id as u32,
-                    x_advance: glyph.advance,
-                    y_advance: 0.0,
-                    x_offset: glyph.x,
-                    y_offset: glyph.y,
-                    cluster: cluster_index,
-                    cell_advance: if glyph_index == 0 { cell_advance } else { 0 },
-                });
                 const MAX_SIMPLE_ADVANCE: u32 = 0x7FFF;
                 if glyph.x == 0. && glyph.y == 0. {
                     let packed_advance = (glyph.advance * 64.) as u32;
@@ -171,20 +124,18 @@ impl RenderData {
                 });
             }
             advance += cluster_advance;
-            cluster_index += 1;
         });
 
         if let Some(graphic) = style.media {
             self.graphics.insert(graphic.id);
         }
 
-        let cache_key = compute_cache_key(&shaped_glyphs, style.font_id, size);
+        let cache_key = compute_cache_key(&glyphs, style.font_id, size);
 
         // Store pre-packed run in shaping cache
         shaping_cache.finish_with_run(CachedRun {
             glyphs: glyphs.clone(),
             detailed_glyphs: detailed_glyphs.clone(),
-            shaped_glyphs: shaped_glyphs.clone(),
             advance,
             cache_key,
         });
@@ -195,13 +146,96 @@ impl RenderData {
             size,
             detailed_glyphs,
             glyphs,
-            shaped_glyphs,
             ascent: metrics.ascent,
             descent: metrics.descent,
             leading: metrics.leading,
             underline_offset: metrics.underline_offset,
             strikeout_offset: metrics.strikeout_offset,
             strikeout_size: metrics.stroke_size,
+            x_height: metrics.x_height,
+            advance,
+            cache_key,
+        };
+        self.runs.push(run_data);
+    }
+
+    /// macOS equivalent of `push_run`: consumes a pre-shaped slice from
+    /// CoreText instead of running the swash `Shaper` callback.
+    ///
+    /// Packing / cache-fill / `RunData` layout are byte-identical to the
+    /// swash path, so the cache-hit path (`push_cached_run`) and downstream
+    /// composition don't care which shaper produced the glyphs.
+    ///
+    /// `metrics` comes from [`crate::font::macos::font_metrics`] — CoreText
+    /// native ascent/descent/leading/underline, plus strikeout derived from
+    /// x-height (CT has no strikeout API).
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn push_run_macos(
+        &mut self,
+        style: SpanStyle,
+        size: f32,
+        line: u32,
+        shaped: &[crate::font::macos::ShapedGlyph],
+        metrics: &crate::font::macos::FontMetrics,
+        shaping_cache: &mut ShapingCache,
+    ) {
+        let mut glyphs = Vec::with_capacity(shaped.len());
+        let mut detailed_glyphs = Vec::new();
+        let mut advance = 0.0f32;
+
+        for g in shaped {
+            advance += g.advance;
+            const MAX_SIMPLE_ADVANCE: u32 = 0x7FFF;
+            if g.x == 0.0 && g.y == 0.0 {
+                let packed_advance = (g.advance * 64.0) as u32;
+                if packed_advance <= MAX_SIMPLE_ADVANCE {
+                    glyphs.push(GlyphData {
+                        data: g.id as u32 | (packed_advance << 16),
+                        size: g.cluster,
+                    });
+                    continue;
+                }
+            }
+            let detail_index = detailed_glyphs.len() as u32;
+            detailed_glyphs.push(Glyph {
+                id: g.id,
+                x: g.x,
+                y: g.y,
+                advance: g.advance,
+                span: g.cluster as usize,
+            });
+            glyphs.push(GlyphData {
+                data: GLYPH_DETAILED | detail_index,
+                size: g.cluster,
+            });
+        }
+
+        if let Some(graphic) = style.media {
+            self.graphics.insert(graphic.id);
+        }
+
+        let cache_key = compute_cache_key(&glyphs, style.font_id, size);
+
+        shaping_cache.finish_with_run(CachedRun {
+            glyphs: glyphs.clone(),
+            detailed_glyphs: detailed_glyphs.clone(),
+            advance,
+            cache_key,
+        });
+
+        let run_data = RunData {
+            span: style,
+            line,
+            size,
+            detailed_glyphs,
+            glyphs,
+            ascent: metrics.ascent,
+            descent: metrics.descent,
+            leading: metrics.leading,
+            underline_offset: metrics.underline_offset,
+            strikeout_offset: metrics.strikeout_offset,
+            strikeout_size: metrics.strikeout_thickness,
             x_height: metrics.x_height,
             advance,
             cache_key,
@@ -230,7 +264,6 @@ impl RenderData {
             size,
             glyphs: cached.glyphs.clone(),
             detailed_glyphs: cached.detailed_glyphs.clone(),
-            shaped_glyphs: cached.shaped_glyphs.clone(),
             ascent,
             descent,
             leading,
@@ -244,70 +277,56 @@ impl RenderData {
         self.runs.push(run_data);
     }
 
+    /// Test helper: pack a flat list of shaped glyphs into a `RunData`
+    /// as if `push_run` had been called, without going through swash's
+    /// `Shaper`. `glyphs_in` is cluster-flattened — cluster boundaries
+    /// don't affect the pack math (advance just sums across all glyphs)
+    /// so the signature takes a single slice.
     #[cfg(test)]
     pub(super) fn push_run_without_shaper(
         &mut self,
         style: SpanStyle,
         size: f32,
         line: u32,
-        content: &str,
-        glyph_clusters: &Vec<OwnedGlyphCluster>,
+        glyphs_in: &[swash::shape::cluster::Glyph],
         metrics: &Metrics,
     ) -> bool {
-        // In case is a new line,
-        // then needs to recompute the span index again
         let mut advance = 0.;
         let mut glyphs = vec![];
         let mut detailed_glyphs = vec![];
-        let mut shaped_glyphs = vec![];
 
-        for (cluster_index, c) in glyph_clusters.iter().enumerate() {
-            let mut cluster_advance = 0.;
-            let cell_advance = cluster_cell_advance(content, c.source);
-            for (glyph_index, glyph) in c.glyphs.iter().enumerate() {
-                cluster_advance += glyph.advance;
-                shaped_glyphs.push(ShapedGlyph {
-                    glyph_id: glyph.id as u32,
-                    x_advance: glyph.advance,
-                    y_advance: 0.0,
-                    x_offset: glyph.x,
-                    y_offset: glyph.y,
-                    cluster: cluster_index as u32,
-                    cell_advance: if glyph_index == 0 { cell_advance } else { 0 },
-                });
-                const MAX_SIMPLE_ADVANCE: u32 = 0x7FFF;
-                if glyph.x == 0. && glyph.y == 0. {
-                    let packed_advance = (glyph.advance * 64.) as u32;
-                    if packed_advance <= MAX_SIMPLE_ADVANCE {
-                        // Simple glyph
-                        glyphs.push(GlyphData {
-                            data: glyph.id as u32 | (packed_advance << 16),
-                            size: glyph.data,
-                        });
-                        continue;
-                    }
+        for glyph in glyphs_in {
+            advance += glyph.advance;
+            const MAX_SIMPLE_ADVANCE: u32 = 0x7FFF;
+            if glyph.x == 0. && glyph.y == 0. {
+                let packed_advance = (glyph.advance * 64.) as u32;
+                if packed_advance <= MAX_SIMPLE_ADVANCE {
+                    // Simple glyph
+                    glyphs.push(GlyphData {
+                        data: glyph.id as u32 | (packed_advance << 16),
+                        size: glyph.data,
+                    });
+                    continue;
                 }
-                // Complex glyph
-                let detail_index = detailed_glyphs.len() as u32;
-                detailed_glyphs.push(Glyph::new(glyph));
-                glyphs.push(GlyphData {
-                    data: GLYPH_DETAILED | detail_index,
-                    size: glyph.data,
-                });
             }
-            advance += cluster_advance;
+            // Complex glyph
+            let detail_index = detailed_glyphs.len() as u32;
+            detailed_glyphs.push(Glyph::new(glyph));
+            glyphs.push(GlyphData {
+                data: GLYPH_DETAILED | detail_index,
+                size: glyph.data,
+            });
         }
         if let Some(graphic) = style.media {
             self.graphics.insert(graphic.id);
         }
-        let cache_key = compute_cache_key(&shaped_glyphs, style.font_id, size);
+        let cache_key = compute_cache_key(&glyphs, style.font_id, size);
         let run_data = RunData {
             span: style,
             line,
             size,
             detailed_glyphs,
             glyphs,
-            shaped_glyphs,
             ascent: metrics.ascent,
             descent: metrics.descent,
             leading: metrics.leading,
@@ -337,7 +356,6 @@ impl RenderData {
             size,
             detailed_glyphs: vec![],
             glyphs: vec![],
-            shaped_glyphs: vec![],
             ascent: metrics.ascent,
             descent: metrics.descent,
             leading: metrics.leading,
@@ -420,34 +438,5 @@ impl Run<'_> {
     #[inline]
     pub fn decoration_color(&self) -> Option<[f32; 4]> {
         self.run.span.decoration_color
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalized_metrics_override_shaper_line_box() {
-        let metrics = Metrics {
-            ascent: 10.0,
-            descent: 4.0,
-            leading: 2.0,
-            underline_offset: -1.5,
-            strikeout_offset: 6.0,
-            stroke_size: 1.0,
-            x_height: 7.0,
-            ..Default::default()
-        };
-
-        let normalized = apply_normalized_metrics(metrics, Some((13.0, 5.0, 0.0)));
-
-        assert_eq!(normalized.ascent, 13.0);
-        assert_eq!(normalized.descent, 5.0);
-        assert_eq!(normalized.leading, 0.0);
-        assert_eq!(normalized.underline_offset, metrics.underline_offset);
-        assert_eq!(normalized.strikeout_offset, metrics.strikeout_offset);
-        assert_eq!(normalized.stroke_size, metrics.stroke_size);
-        assert_eq!(normalized.x_height, metrics.x_height);
     }
 }

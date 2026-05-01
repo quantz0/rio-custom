@@ -6,9 +6,6 @@
 #![allow(clippy::uninlined_format_args)]
 
 use crate::font::FontLibrary;
-use crate::font_introspector::shape::ShapeContext;
-use crate::font_introspector::text::Script;
-use crate::font_introspector::FontRef;
 use crate::layout::content_data::{ContentData, ContentState};
 use crate::layout::render_data::RenderData;
 use crate::layout::TextLayout;
@@ -18,32 +15,15 @@ use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
+use swash::shape::ShapeContext;
+use swash::text::Script;
+#[cfg(not(target_os = "macos"))]
+use swash::FontRef;
 use tracing::debug;
 
-use crate::font_introspector::Attributes;
-use crate::font_introspector::Setting;
 use crate::{sugarloaf::primitives::SugarCursor, DrawableChar, Graphic};
-
-const TERMINAL_GRID_DISABLED_SUBSTITUTIONS: [(&str, u16); 5] = [
-    ("liga", 0),
-    ("clig", 0),
-    ("dlig", 0),
-    ("hlig", 0),
-    ("calt", 0),
-];
-
-fn terminal_grid_shape_features(
-    features: &[Setting<u16>],
-) -> SmallVec<[Setting<u16>; 8]> {
-    let mut grid_features = SmallVec::new();
-    grid_features.extend(features.iter().copied());
-    grid_features.extend(
-        TERMINAL_GRID_DISABLED_SUBSTITUTIONS
-            .iter()
-            .map(Setting::from),
-    );
-    grid_features
-}
+use swash::Attributes;
+use swash::Setting;
 
 /// Pre-packed shaping result ready to push directly as a RunData.
 /// Avoids re-packing OwnedGlyphClusters on every cache hit.
@@ -51,7 +31,6 @@ fn terminal_grid_shape_features(
 pub struct CachedRun {
     pub glyphs: Vec<crate::layout::glyph::GlyphData>,
     pub detailed_glyphs: Vec<crate::layout::glyph::Glyph>,
-    pub shaped_glyphs: Vec<crate::font::text_run_cache::ShapedGlyph>,
     pub advance: f32,
     pub cache_key: u64,
 }
@@ -378,7 +357,7 @@ pub enum SpanStyleDecoration {
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct SpanStyle {
     pub font_id: usize,
-    //  Unicode width
+    // Unicode width
     pub width: f32,
     /// Font attributes.
     pub font_attrs: Attributes,
@@ -409,10 +388,11 @@ pub struct SpanStyle {
     /// Does NOT affect positioning/advance — only compositor scaling.
     pub pua_constraint: Option<f32>,
     /// Optional per-glyph Nerd Font constraint (size / alignment /
-    /// padding) ported from ghostty's patcher table. When set, the
-    /// compositor uses ghostty's constrain() math to lay the glyph out
-    /// instead of the generic cell-centered fit. Only populated by the
-    /// renderer for codepoints with a table entry (`get_constraint`).
+    /// padding) sourced from the Nerd Fonts patcher table. When set,
+    /// the compositor lays the glyph out using the constraint math
+    /// in `nerd_font_attributes` instead of the generic cell-centered
+    /// fit. Only populated by the renderer for codepoints with a
+    /// table entry (`get_constraint`).
     pub nerd_font_constraint: Option<crate::font::nerd_font_attributes::Constraint>,
 }
 
@@ -442,13 +422,55 @@ impl Default for SpanStyle {
 /// Context for paragraph layout.
 pub struct Content {
     fonts: FontLibrary,
-    font_features: Vec<crate::font_introspector::Setting<u16>>,
+    font_features: Vec<swash::Setting<u16>>,
     scx: ShapeContext,
     pub states: FxHashMap<usize, ContentState>,
     /// Transient text content that gets cleared after each render
     pub transient_texts: Vec<ContentState>,
     shaping_cache: ShapingCache,
     selector: Option<usize>,
+}
+
+/// Compute the canonical [`CellMetrics`] from face metrics already
+/// scaled to physical pixels. Pure function so the formula is
+/// testable without standing up a `Content`.
+///
+/// Inputs:
+/// - `face_width / face_height`: unrounded cell dims in physical px
+///   (`face_height` already has the user's `line_height` multiplier
+///   applied).
+/// - `descent_phys / leading_phys`: descent and line gap in physical
+///   px, also multiplied by `line_height`. Descent is a *positive*
+///   magnitude (swash convention).
+///
+/// Centering invariant: if `face_height` is `33.4` and rounds to
+/// `33`, the baseline shifts up by `0.2` so the glyph stays
+/// centered in the rounded cell — matches the half-rounding-delta
+/// adjustment used elsewhere for vertical pixel-snapping.
+#[inline]
+pub(crate) fn canonical_cell_metrics(
+    face_width: f64,
+    face_height: f64,
+    descent_phys: f64,
+    leading_phys: f64,
+) -> crate::layout::CellMetrics {
+    let cell_width = face_width.round().max(1.0) as u32;
+    let cell_height = face_height.round().max(1.0) as u32;
+    // Unrounded baseline: line_gap split evenly above and below the
+    // glyph, descent below. Sign-flipped from Zig's negative-descent
+    // convention since swash reports descent as positive.
+    let face_baseline = leading_phys * 0.5 + descent_phys;
+    let baseline_centered = face_baseline - (cell_height as f64 - face_height) * 0.5;
+    let cell_baseline = baseline_centered.round().max(0.0) as u32;
+    let face_y = cell_baseline as f64 - face_baseline;
+    crate::layout::CellMetrics {
+        cell_width,
+        cell_height,
+        cell_baseline,
+        face_width,
+        face_height,
+        face_y,
+    }
 }
 
 impl Content {
@@ -477,27 +499,6 @@ impl Content {
         });
 
         self
-    }
-
-    /// Clear image overlays on the selected content state.
-    pub fn clear_image_overlays(&mut self) {
-        if let Some(id) = self.selector {
-            if let Some(state) = self.states.get_mut(&id) {
-                state.image_overlays.clear();
-            }
-        }
-    }
-
-    /// Push an image overlay onto the selected content state.
-    pub fn push_image_overlay(
-        &mut self,
-        overlay: crate::sugarloaf::graphics::GraphicOverlay,
-    ) {
-        if let Some(id) = self.selector {
-            if let Some(state) = self.states.get_mut(&id) {
-                state.image_overlays.push(overlay);
-            }
-        }
     }
 
     #[inline]
@@ -551,10 +552,7 @@ impl Content {
     }
 
     #[inline]
-    pub fn set_font_features(
-        &mut self,
-        font_features: Vec<crate::font_introspector::Setting<u16>>,
-    ) {
+    pub fn set_font_features(&mut self, font_features: Vec<swash::Setting<u16>>) {
         self.font_features = font_features;
     }
 
@@ -564,8 +562,9 @@ impl Content {
         let mut builder_state = BuilderState::from_layout(rich_text_layout);
 
         // Immediately calculate dimensions for a representative character
-        builder_state.layout.dimensions =
-            self.calculate_character_cell_dimensions(rich_text_layout);
+        let (dims, cell) = self.calculate_character_cell_dimensions(rich_text_layout);
+        builder_state.layout.dimensions = dims;
+        builder_state.layout.cell = cell;
 
         if let Some(content_state) = self.states.get_mut(&id) {
             content_state.data = ContentData::Text(builder_state);
@@ -577,83 +576,111 @@ impl Content {
         }
     }
 
-    /// Calculate character cell dimensions
+    /// Calculate character cell dimensions and the canonical
+    /// [`CellMetrics`] used by the renderer + mouse + layout.
+    ///
+    /// Integer cell width / height / baseline are produced by
+    /// `.round()`-ing the unrounded `face_*` values once at this
+    /// layer. All downstream consumers read those integers —
+    /// there's no second rounding stage anywhere in the pipeline,
+    /// so the renderer's painted stride and the mouse hit-test
+    /// divide by the same value.
+    ///
+    /// `line_height` (the user's config multiplier) is applied to
+    /// `face_height` here, so callers must NOT re-apply it.
     fn calculate_character_cell_dimensions(
         &self,
         layout: &TextLayout,
-    ) -> crate::layout::TextDimensions {
-        let scale = layout.dimensions.scale;
-        let scaled_font_size = layout.font_size * scale;
-        let fallback_width = scaled_font_size.max(1.0);
-        let fallback_height = (scaled_font_size * layout.line_height).max(1.0);
+    ) -> (crate::layout::TextDimensions, crate::layout::CellMetrics) {
+        let font_size = layout.font_size;
+        let scale_f64 = layout.dimensions.scale as f64;
+        let line_height_mod = layout.line_height as f64;
 
-        let mut font_library_data = self.fonts.inner.write();
-        {
-            let font_id = 0; // FONT_ID_REGULAR
-
-            // `get_font_metrics` already returns the ceiled terminal cell
-            // height via `Metrics::for_rich_text`. Keep viewport row
-            // calculation on that same grid so resize never allocates a row
-            // that rendering clips outside the panel.
-            let line_height_physical = font_library_data
-                .get_font_metrics(&font_id, scaled_font_size)
-                .map(|(ascent, descent, leading)| {
-                    ((ascent + descent + leading).ceil() * layout.line_height).max(1.0)
-                })
-                .unwrap_or(fallback_height);
-
-            // Get font data to create swash FontRef
-            if let Some((font_data, offset, _key)) = font_library_data.get_data(&font_id)
+        // (char_width, ascent, descent, leading) in pixels at the
+        // *logical* font size (i.e. before `scale` is applied).
+        let raw: Option<(f64, f64, f64, f64)> = {
+            #[cfg(target_os = "macos")]
             {
-                // Create swash FontRef directly from font data
-                if let Some(font_ref) = crate::font_introspector::FontRef::from_index(
-                    &font_data,
-                    offset as usize,
-                ) {
-                    // Get metrics using swash
-                    let font_metrics = font_ref.metrics(&[]);
-
-                    // Calculate character cell width using space character
-                    let glyph_id = font_ref.charmap().map(' ' as u32);
-                    let char_width = {
-                        // Get advance width for space character using GlyphMetrics
-                        let glyph_metrics =
-                            crate::font_introspector::GlyphMetrics::from_font(
-                                &font_ref,
-                                &[],
-                            );
-                        let advance = glyph_metrics.advance_width(glyph_id);
-
-                        // Scale directly into physical pixels to match
-                        // renderer-space coordinates.
-                        let units_per_em = font_metrics.units_per_em as f32;
-                        let scale_factor = scaled_font_size / units_per_em;
-
-                        if advance > 0.0 {
-                            advance * scale_factor
-                        } else {
-                            // Fallback: approximate monospace character width
-                            fallback_width
-                        }
-                    };
-
-                    // Return dimensions in physical pixels (matching brush behavior)
-                    let result = crate::layout::TextDimensions {
-                        width: char_width.max(1.0),
-                        height: line_height_physical,
-                        scale,
-                    };
-
-                    return result;
-                }
+                self.fonts.ct_font(0).map(|handle| {
+                    let m = crate::font::macos::font_metrics(&handle, font_size);
+                    // Cell width = max advance across printable ASCII at
+                    // the real render size. Same progressive fallback as
+                    // before — final fallback is `font_size` (the em).
+                    let cw = crate::font::macos::max_ascii_advance_px(&handle, font_size)
+                        .or_else(|| {
+                            crate::font::macos::advance_units_for_char(&handle, ' ')
+                                .map(|(units, upem)| units * font_size / upem as f32)
+                        })
+                        .unwrap_or(font_size);
+                    (
+                        cw as f64,
+                        m.ascent as f64,
+                        m.descent as f64,
+                        m.leading as f64,
+                    )
+                })
             }
+            #[cfg(not(target_os = "macos"))]
+            {
+                self.fonts.inner.try_read().and_then(|lib| {
+                    let id = 0;
+                    let (data, offset, _key) = lib.get_data(&id)?;
+                    let font_ref = swash::FontRef::from_index(&data, offset as usize)?;
+                    let m = font_ref.metrics(&[]);
+                    let upem = m.units_per_em as f32;
+                    let s = font_size / upem;
+                    let glyph = font_ref.charmap().map(' ' as u32);
+                    let advance = font_ref.glyph_metrics(&[]).advance_width(glyph);
+                    let cw = if advance > 0.0 {
+                        advance * s
+                    } else {
+                        font_size
+                    };
+                    Some((
+                        cw as f64,
+                        (m.ascent * s) as f64,
+                        (m.descent.abs() * s) as f64,
+                        (m.leading * s) as f64,
+                    ))
+                })
+            }
+        };
 
-            return crate::layout::TextDimensions {
-                width: fallback_width,
-                height: line_height_physical,
-                scale,
+        let (face_width, face_height, descent_phys, leading_phys) =
+            if let Some((cw, ascent, descent, leading)) = raw {
+                let face_width = cw * scale_f64;
+                let face_height =
+                    (ascent + descent + leading) * line_height_mod * scale_f64;
+                (
+                    face_width,
+                    face_height,
+                    descent * line_height_mod * scale_f64,
+                    leading * line_height_mod * scale_f64,
+                )
+            } else {
+                // Last-resort fallback: square em cell at the configured
+                // line_height. No baseline information, so cell_baseline
+                // ends up 0.
+                let fw = font_size as f64 * scale_f64;
+                let fh = font_size as f64 * line_height_mod * scale_f64;
+                (fw, fh, 0.0, 0.0)
             };
-        }
+
+        let cell =
+            canonical_cell_metrics(face_width, face_height, descent_phys, leading_phys);
+
+        let dims = crate::layout::TextDimensions {
+            // Legacy fields kept for back-compat with sugarloaf-side
+            // consumers that still read TextDimensions. Now snapped
+            // to the same integer cell stride (was: `.ceil()` on
+            // height, raw on width — produced drift at high column
+            // indexes when paired with the mouse path's unrounded
+            // divide).
+            width: cell.cell_width as f32,
+            height: cell.cell_height as f32,
+            scale: layout.dimensions.scale,
+        };
+        (dims, cell)
     }
 
     #[inline]
@@ -675,8 +702,9 @@ impl Content {
     #[inline]
     pub fn add_transient_text(&mut self, layout: &TextLayout) -> usize {
         let mut builder_state = BuilderState::from_layout(layout);
-        builder_state.layout.dimensions =
-            self.calculate_character_cell_dimensions(layout);
+        let (dims, cell) = self.calculate_character_cell_dimensions(layout);
+        builder_state.layout.dimensions = dims;
+        builder_state.layout.cell = cell;
 
         let mut content_state = ContentState::new(ContentData::Text(builder_state));
         content_state.render_data.transient = true;
@@ -722,7 +750,6 @@ impl Content {
             // Process each line
             for line_number in 0..num_lines {
                 let content_state = &mut self.transient_texts[transient_idx];
-                let use_grid_cell_size = content_state.render_data.use_grid_cell_size;
                 let text_state = match content_state.as_text_mut() {
                     Some(state) => state,
                     None => continue,
@@ -733,7 +760,6 @@ impl Content {
                     line_number,
                     scaled_font_size,
                     script,
-                    use_grid_cell_size,
                     &self.font_features,
                     &self.fonts,
                     &mut self.scx,
@@ -751,10 +777,11 @@ impl Content {
             return;
         };
 
-        let new_dimension = self.calculate_character_cell_dimensions(&layout);
+        let (new_dimension, new_cell) = self.calculate_character_cell_dimensions(&layout);
 
         if let Some(text_state) = self.get_state_mut(state_id) {
             text_state.layout.dimensions = new_dimension;
+            text_state.layout.cell = new_cell;
         }
     }
 
@@ -970,7 +997,6 @@ impl Content {
             Some(state) => state,
             None => return,
         };
-        let use_grid_cell_size = content_state.render_data.use_grid_cell_size;
 
         let text_state = match content_state.as_text_mut() {
             Some(state) => state,
@@ -982,7 +1008,6 @@ impl Content {
             line_number,
             scaled_font_size,
             script,
-            use_grid_cell_size,
             features,
             &self.fonts,
             &mut self.scx,
@@ -991,13 +1016,13 @@ impl Content {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(target_os = "macos", allow(unused_variables))]
     fn process_text_line(
         text_state: &mut BuilderState,
         line_number: usize,
         scaled_font_size: f32,
         script: Script,
-        use_grid_cell_size: bool,
-        features: &[crate::font_introspector::Setting<u16>],
+        features: &[swash::Setting<u16>],
         fonts: &FontLibrary,
         scx: &mut ShapeContext,
         shaping_cache: &mut ShapingCache,
@@ -1027,7 +1052,7 @@ impl Content {
                             .write()
                             .get_font_metrics(&font_id, scaled_font_size)
                     } {
-                        let metrics = crate::font_introspector::Metrics {
+                        let metrics = swash::Metrics {
                             ascent,
                             descent,
                             leading,
@@ -1044,28 +1069,8 @@ impl Content {
                 }
             };
 
-            let grid_features;
-            let shape_features = if use_grid_cell_size {
-                // Terminal grid text is cell-addressed. Multi-codepoint
-                // substitution features can collapse visible cells into one
-                // glyph, which makes characters appear missing until a
-                // selection splits the run.
-                grid_features = terminal_grid_shape_features(features);
-                grid_features.as_slice()
-            } else {
-                features
-            };
-            let vars = text_state.vars.get(font_vars);
-
             // Check run cache — pre-packed so no re-packing needed
-            if let Some(cached_run) = shaping_cache.get(
-                &font_id,
-                content,
-                scaled_font_size,
-                script,
-                shape_features,
-                vars,
-            ) {
+            if let Some(cached_run) = shaping_cache.get(&font_id, content) {
                 if let Some((ascent, descent, leading)) = if font_id == 0 {
                     metrics_result
                 } else {
@@ -1089,54 +1094,61 @@ impl Content {
                 }
             }
 
-            // Cache miss: shape the full run and store result
-            shaping_cache.set_content(
-                font_id,
-                content,
-                scaled_font_size,
-                script,
-                shape_features,
-                vars,
-            );
+            // Cache miss: shape the full run and store result.
+            shaping_cache.set_content(font_id, content);
 
-            // Only allocate vars on the miss path
-            let vars: Vec<_> = vars.to_vec();
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(handle) = fonts.ct_font(font_id) {
+                    let shaped = crate::font::macos::shape_text(
+                        &handle,
+                        content,
+                        scaled_font_size,
+                    );
+                    let macos_metrics =
+                        crate::font::macos::font_metrics(&handle, scaled_font_size);
+                    line.render_data.push_run_macos(
+                        style,
+                        scaled_font_size,
+                        line_number as u32,
+                        &shaped,
+                        &macos_metrics,
+                        shaping_cache,
+                    );
+                }
+            }
 
-            let normalized_metrics = if font_id == 0 {
-                metrics_result
-            } else {
-                fonts
-                    .inner
-                    .write()
-                    .get_font_metrics(&font_id, scaled_font_size)
-            };
+            #[cfg(not(target_os = "macos"))]
+            {
+                // Only allocate vars on the miss path
+                let vars: Vec<_> = text_state.vars.get(font_vars).to_vec();
 
-            let font_library = &fonts.inner.read();
-            if let Some((shared_data, offset, key)) = font_library.get_data(&font_id) {
-                let font_ref = FontRef {
-                    data: shared_data.as_ref(),
-                    offset,
-                    key,
-                };
-                let mut shaper = scx
-                    .builder(font_ref)
-                    .script(script)
-                    .size(scaled_font_size)
-                    .features(shape_features.iter().copied())
-                    .variations(vars.iter().copied())
-                    .build();
+                let font_library = &fonts.inner.read();
+                if let Some((shared_data, offset, key)) = font_library.get_data(&font_id)
+                {
+                    let font_ref = FontRef {
+                        data: shared_data.as_ref(),
+                        offset,
+                        key,
+                    };
+                    let mut shaper = scx
+                        .builder(font_ref)
+                        .script(script)
+                        .size(scaled_font_size)
+                        .features(features.iter().copied())
+                        .variations(vars.iter().copied())
+                        .build();
 
-                shaper.add_str(content);
+                    shaper.add_str(content);
 
-                line.render_data.push_run(
-                    style,
-                    scaled_font_size,
-                    line_number as u32,
-                    shaper,
-                    content,
-                    shaping_cache,
-                    normalized_metrics,
-                );
+                    line.render_data.push_run(
+                        style,
+                        scaled_font_size,
+                        line_number as u32,
+                        shaper,
+                        shaping_cache,
+                    );
+                }
             }
         }
     }
@@ -1442,13 +1454,13 @@ impl Content {
     }
 }
 
-/// Run-level shaping cache (like Ghostty's ShaperCache).
+/// Run-level shaping cache (like ShaperCache).
 ///
-/// Caches pre-packed shaped runs per text run and shaping inputs.
-/// The shaper always sees the full run so non-grid ligatures are handled naturally.
+/// Caches pre-packed shaped runs per text run, keyed by (content + font_id).
+/// The shaper always sees the full run so ligatures are handled naturally.
 /// Stores packed GlyphData directly so cache hits avoid re-packing.
 pub struct ShapingCache {
-    /// LRU cache per font_id: hash(shaping inputs) → pre-packed run
+    /// LRU cache per font_id: hash(content + font_id) → pre-packed run
     inner: FxHashMap<usize, LruCache<u64, CachedRun>>,
     /// Current shaping context
     font_id: usize,
@@ -1472,16 +1484,8 @@ impl ShapingCache {
 
     /// Look up a pre-packed cached run.
     #[inline]
-    pub fn get(
-        &mut self,
-        font_id: &usize,
-        content: &str,
-        size: f32,
-        script: Script,
-        features: &[Setting<u16>],
-        vars: &[Setting<f32>],
-    ) -> Option<&CachedRun> {
-        let key = Self::cache_key(content, *font_id, size, script, features, vars);
+    pub fn get(&mut self, font_id: &usize, content: &str) -> Option<&CachedRun> {
+        let key = Self::cache_key(content, *font_id);
         if let Some(cache) = self.inner.get_mut(font_id) {
             return cache.get(&key);
         }
@@ -1490,18 +1494,9 @@ impl ShapingCache {
 
     /// Record which content is about to be shaped (called before shaping).
     #[inline]
-    pub fn set_content(
-        &mut self,
-        font_id: usize,
-        content: &str,
-        size: f32,
-        script: Script,
-        features: &[Setting<u16>],
-        vars: &[Setting<f32>],
-    ) {
+    pub fn set_content(&mut self, font_id: usize, content: &str) {
         self.font_id = font_id;
-        self.content_hash =
-            Self::cache_key(content, font_id, size, script, features, vars);
+        self.content_hash = Self::cache_key(content, font_id);
     }
 
     /// Store a pre-packed run in the cache after shaping.
@@ -1529,33 +1524,12 @@ impl ShapingCache {
         debug!("ShapingCache cleared");
     }
 
-    /// Compute a position-independent cache key from every input that affects
-    /// shaping. Content alone is insufficient because the same run can be
-    /// shaped differently across font sizes, scripts, features, and variations.
+    /// Compute a position-independent cache key from content and font_id.
     #[inline]
-    pub fn cache_key(
-        content: &str,
-        font_id: usize,
-        size: f32,
-        script: Script,
-        features: &[Setting<u16>],
-        vars: &[Setting<f32>],
-    ) -> u64 {
+    pub fn cache_key(content: &str, font_id: usize) -> u64 {
         let mut hasher = rustc_hash::FxHasher::default();
         content.hash(&mut hasher);
         font_id.hash(&mut hasher);
-        size.to_bits().hash(&mut hasher);
-        script.hash(&mut hasher);
-        features.len().hash(&mut hasher);
-        for feature in features {
-            feature.tag.hash(&mut hasher);
-            feature.value.hash(&mut hasher);
-        }
-        vars.len().hash(&mut hasher);
-        for var in vars {
-            var.tag.hash(&mut hasher);
-            var.value.to_bits().hash(&mut hasher);
-        }
         hasher.finish()
     }
 }
@@ -1563,29 +1537,72 @@ impl ShapingCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::font::FontLibrary;
-    use crate::font_introspector::shape::cluster::{Glyph, OwnedGlyphCluster};
-    use crate::font_introspector::text::cluster::SourceRange;
-    use std::sync::mpsc;
-    use std::time::Duration;
+    use swash::shape::cluster::Glyph;
 
-    const TEST_FONT_SIZE: f32 = 16.0;
-    const TEST_SCRIPT: Script = Script::Latin;
-
-    fn cache_get_default<'a>(
-        cache: &'a mut ShapingCache,
-        font_id: &usize,
-        content: &str,
-    ) -> Option<&'a CachedRun> {
-        cache.get(font_id, content, TEST_FONT_SIZE, TEST_SCRIPT, &[], &[])
+    /// Pixel-perfect when face dimensions are already integer:
+    /// rounding is a no-op so cell == face and the centering
+    /// adjustment vanishes.
+    #[test]
+    fn canonical_cell_metrics_no_rounding_delta() {
+        let cell = canonical_cell_metrics(16.0, 33.0, 4.0, 2.0);
+        assert_eq!(cell.cell_width, 16);
+        assert_eq!(cell.cell_height, 33);
+        // baseline = leading*0.5 + descent = 1 + 4 = 5
+        assert_eq!(cell.cell_baseline, 5);
+        assert_eq!(cell.face_y, 0.0);
     }
 
-    fn cache_set_default(cache: &mut ShapingCache, font_id: usize, content: &str) {
-        cache.set_content(font_id, content, TEST_FONT_SIZE, TEST_SCRIPT, &[], &[]);
+    /// Centering: face_height = 32.4 rounds DOWN to 32, so the
+    /// baseline must shift by half the rounding delta (≈ +0.2)
+    /// so the glyph stays vertically centered in the rounded cell.
+    #[test]
+    fn canonical_cell_metrics_centers_after_round_down() {
+        let cell = canonical_cell_metrics(16.0, 32.4, 4.0, 2.0);
+        assert_eq!(cell.cell_height, 32);
+        // face_baseline = 1 + 4 = 5
+        // baseline_centered = 5 - (32 - 32.4) / 2 = 5 + 0.2 = 5.2 → round 5
+        assert_eq!(cell.cell_baseline, 5);
+        // face_y = 5 - 5 = 0  (cell_baseline rounds back to face_baseline here)
+        assert!((cell.face_y - 0.0).abs() < 1e-9);
     }
 
-    fn cache_key_default(content: &str, font_id: usize) -> u64 {
-        ShapingCache::cache_key(content, font_id, TEST_FONT_SIZE, TEST_SCRIPT, &[], &[])
+    /// Centering: face_height = 32.6 rounds UP to 33, baseline
+    /// shifts by ~ -0.3 (so the glyph drops slightly to stay
+    /// centered in the now-taller rounded cell).
+    #[test]
+    fn canonical_cell_metrics_centers_after_round_up() {
+        let cell = canonical_cell_metrics(16.0, 32.6, 4.0, 2.0);
+        assert_eq!(cell.cell_height, 33);
+        // face_baseline = 5
+        // baseline_centered = 5 - (33 - 32.6) / 2 = 5 - 0.2 = 4.8 → round 5
+        assert_eq!(cell.cell_baseline, 5);
+    }
+
+    /// Invariants: 0 ≤ cell_baseline ≤ cell_height.
+    /// Holds across a sweep of face dimensions, including small
+    /// fonts where descent + half_gap might be larger than the
+    /// rounding delta.
+    #[test]
+    fn canonical_cell_metrics_baseline_within_cell() {
+        for face_h in [12.0, 13.4, 18.7, 24.0, 33.0, 49.5, 66.0] {
+            let cell = canonical_cell_metrics(8.0, face_h, 3.0, 1.0);
+            assert!(
+                cell.cell_baseline <= cell.cell_height,
+                "baseline {} > cell_height {} at face_h={}",
+                cell.cell_baseline,
+                cell.cell_height,
+                face_h
+            );
+        }
+    }
+
+    /// `face_width.round().max(1.0)` clamps degenerate sub-pixel
+    /// widths so the divide path in `compute()` doesn't get a
+    /// zero stride.
+    #[test]
+    fn canonical_cell_metrics_clamps_width_floor() {
+        let cell = canonical_cell_metrics(0.3, 16.0, 4.0, 2.0);
+        assert_eq!(cell.cell_width, 1);
     }
 
     fn create_test_glyph(id: u16, x: f32, y: f32, advance: f32) -> Glyph {
@@ -1599,40 +1616,8 @@ mod tests {
         }
     }
 
-    fn create_test_cluster(
-        source_start: u32,
-        source_end: u32,
-        glyph: Glyph,
-    ) -> OwnedGlyphCluster {
-        OwnedGlyphCluster {
-            source: SourceRange {
-                start: source_start,
-                end: source_end,
-            },
-            info: Default::default(),
-            glyphs: vec![glyph],
-            components: Vec::new(),
-            data: Default::default(),
-        }
-    }
-
     fn make_cached_run(glyphs: &[(u16, f32)]) -> CachedRun {
         use crate::layout::glyph::GlyphData;
-        let shaped_glyphs = glyphs
-            .iter()
-            .enumerate()
-            .map(
-                |(index, &(id, advance))| crate::font::text_run_cache::ShapedGlyph {
-                    glyph_id: id as u32,
-                    x_advance: advance,
-                    y_advance: 0.0,
-                    x_offset: 0.0,
-                    y_offset: 0.0,
-                    cluster: index as u32,
-                    cell_advance: 1,
-                },
-            )
-            .collect();
         let glyph_data: Vec<GlyphData> = glyphs
             .iter()
             .map(|&(id, advance)| GlyphData::simple(id, advance, 0))
@@ -1642,168 +1627,9 @@ mod tests {
         CachedRun {
             glyphs: glyph_data,
             detailed_glyphs: vec![],
-            shaped_glyphs,
             advance,
             cache_key,
         }
-    }
-
-    fn make_cached_run_with_cell_advances(glyphs: &[(u16, f32, u16)]) -> CachedRun {
-        use crate::layout::glyph::GlyphData;
-        let shaped_glyphs = glyphs
-            .iter()
-            .enumerate()
-            .map(|(index, &(id, advance, cell_advance))| {
-                crate::font::text_run_cache::ShapedGlyph {
-                    glyph_id: id as u32,
-                    x_advance: advance,
-                    y_advance: 0.0,
-                    x_offset: 0.0,
-                    y_offset: 0.0,
-                    cluster: index as u32,
-                    cell_advance,
-                }
-            })
-            .collect();
-        let glyph_data: Vec<GlyphData> = glyphs
-            .iter()
-            .map(|&(id, advance, _)| GlyphData::simple(id, advance, 0))
-            .collect();
-        let advance = glyphs.iter().map(|g| g.1).sum();
-        let cache_key = 42; // dummy
-        CachedRun {
-            glyphs: glyph_data,
-            detailed_glyphs: vec![],
-            shaped_glyphs,
-            advance,
-            cache_key,
-        }
-    }
-
-    #[test]
-    fn test_character_cell_height_matches_renderer_metrics_path() {
-        let font_library = FontLibrary::default();
-        let content = Content::new(&font_library);
-        let layout = TextLayout {
-            line_height: 1.25,
-            font_size: 18.0,
-            original_font_size: 18.0,
-            dimensions: crate::layout::TextDimensions {
-                width: 0.0,
-                height: 0.0,
-                scale: 1.5,
-            },
-        };
-
-        let dimensions = content.calculate_character_cell_dimensions(&layout);
-        let scaled_font_size = layout.font_size * layout.dimensions.scale;
-        let expected_height = font_library
-            .inner
-            .write()
-            .get_font_metrics(&0, scaled_font_size)
-            .map(|(ascent, descent, leading)| {
-                (ascent + descent + leading) * layout.line_height
-            })
-            .unwrap();
-
-        assert!(
-            (dimensions.height - expected_height).abs() < f32::EPSILON,
-            "cell height must match renderer metrics path: got {}, expected {}",
-            dimensions.height,
-            expected_height
-        );
-        assert!(dimensions.width > 0.0);
-    }
-
-    #[test]
-    fn character_cell_dimensions_waits_for_font_metrics_when_lock_is_busy() {
-        let font_library = FontLibrary::default();
-        let content = Content::new(&font_library);
-        let layout = TextLayout {
-            line_height: 1.25,
-            font_size: 18.0,
-            original_font_size: 18.0,
-            dimensions: crate::layout::TextDimensions {
-                width: 0.0,
-                height: 0.0,
-                scale: 1.5,
-            },
-        };
-        let scaled_font_size = layout.font_size * layout.dimensions.scale;
-        let fallback_height = scaled_font_size * layout.line_height;
-        let expected_height = {
-            let mut font_library_data = font_library.inner.write();
-            font_library_data
-                .get_font_metrics(&0, scaled_font_size)
-                .map(|(ascent, descent, leading)| {
-                    ((ascent + descent + leading).ceil() * layout.line_height).max(1.0)
-                })
-                .unwrap()
-        };
-
-        assert!(
-            (expected_height - fallback_height).abs() > f32::EPSILON,
-            "test must distinguish real font metrics from fallback height"
-        );
-
-        let (lock_held_tx, lock_held_rx) = mpsc::channel();
-        let fonts = font_library.inner.clone();
-        let lock_holder = std::thread::spawn(move || {
-            let _guard = fonts.read();
-            lock_held_tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_millis(50));
-        });
-        lock_held_rx.recv().unwrap();
-
-        let dimensions = content.calculate_character_cell_dimensions(&layout);
-
-        lock_holder.join().unwrap();
-        assert!(
-            (dimensions.height - expected_height).abs() < f32::EPSILON,
-            "busy font lock must not fall back to font_size-derived height: got {}, expected {}",
-            dimensions.height,
-            expected_height
-        );
-    }
-
-    #[test]
-    fn cache_miss_run_uses_font_library_grid_metrics() {
-        let font_library = FontLibrary::default();
-        let mut content = Content::new(&font_library);
-        let text_id = 7;
-        let layout = TextLayout {
-            line_height: 1.25,
-            font_size: 18.0,
-            original_font_size: 18.0,
-            dimensions: crate::layout::TextDimensions {
-                width: 0.0,
-                height: 0.0,
-                scale: 1.5,
-            },
-        };
-        let scaled_font_size = layout.font_size * layout.dimensions.scale;
-        let expected = {
-            let mut font_library_data = font_library.inner.write();
-            font_library_data
-                .get_font_metrics(&0, scaled_font_size)
-                .unwrap()
-        };
-
-        content.set_text(text_id, &layout);
-        content
-            .get_state_mut(&text_id)
-            .unwrap()
-            .add_span("A", SpanStyle::default());
-        content.sel(text_id);
-        content.build();
-
-        let text_state = content.get_state(&text_id).unwrap();
-        let run = &text_state.lines[0].render_data.runs[0];
-        assert_eq!(
-            (run.ascent, run.descent, run.leading),
-            expected,
-            "cache-miss shaping path must use the same grid metrics as cache hits"
-        );
     }
 
     #[test]
@@ -1812,10 +1638,10 @@ mod tests {
         let font_id = 0;
 
         // Empty cache: miss
-        assert!(cache_get_default(&mut cache, &font_id, "hello").is_none());
+        assert!(cache.get(&font_id, "hello").is_none());
 
         // Store a pre-packed run for "hello"
-        cache_set_default(&mut cache, font_id, "hello");
+        cache.set_content(font_id, "hello");
         cache.finish_with_run(make_cached_run(&[
             (104, 8.0),
             (101, 8.0),
@@ -1825,20 +1651,14 @@ mod tests {
         ]));
 
         // Same run: hit
-        assert!(cache_get_default(&mut cache, &font_id, "hello").is_some());
-        assert_eq!(
-            cache_get_default(&mut cache, &font_id, "hello")
-                .unwrap()
-                .glyphs
-                .len(),
-            5
-        );
+        assert!(cache.get(&font_id, "hello").is_some());
+        assert_eq!(cache.get(&font_id, "hello").unwrap().glyphs.len(), 5);
 
         // Different run: miss
-        assert!(cache_get_default(&mut cache, &font_id, "world").is_none());
+        assert!(cache.get(&font_id, "world").is_none());
 
         // Different font: miss
-        assert!(cache_get_default(&mut cache, &1, "hello").is_none());
+        assert!(cache.get(&1, "hello").is_none());
     }
 
     #[test]
@@ -1847,13 +1667,12 @@ mod tests {
         let font_id = 0;
 
         // Store "=>" as a single ligature glyph
-        cache_set_default(&mut cache, font_id, "=>");
-        cache.finish_with_run(make_cached_run_with_cell_advances(&[(999, 16.0, 2)]));
+        cache.set_content(font_id, "=>");
+        cache.finish_with_run(make_cached_run(&[(999, 16.0)]));
 
         // Should hit and preserve the ligature (1 glyph, not 2)
-        let cached = cache_get_default(&mut cache, &font_id, "=>").unwrap();
+        let cached = cache.get(&font_id, "=>").unwrap();
         assert_eq!(cached.glyphs.len(), 1);
-        assert_eq!(cached.shaped_glyphs[0].cell_advance, 2);
     }
 
     #[test]
@@ -1861,99 +1680,31 @@ mod tests {
         let mut cache = ShapingCache::new();
         let font_id = 0;
 
-        cache_set_default(&mut cache, font_id, "test");
+        cache.set_content(font_id, "test");
         cache.finish_with_run(make_cached_run(&[(1, 8.0)]));
 
-        assert!(cache_get_default(&mut cache, &font_id, "test").is_some());
+        assert!(cache.get(&font_id, "test").is_some());
         cache.clear();
-        assert!(cache_get_default(&mut cache, &font_id, "test").is_none());
+        assert!(cache.get(&font_id, "test").is_none());
     }
 
     #[test]
     fn test_shaping_cache_key_no_collision() {
-        let along_key = cache_key_default("along", 1);
-        let clone_key = cache_key_default("clone", 1);
+        let along_key = ShapingCache::cache_key("along", 1);
+        let clone_key = ShapingCache::cache_key("clone", 1);
         assert_ne!(along_key, clone_key);
 
         // Same content, different font
-        assert_ne!(cache_key_default("test", 0), cache_key_default("test", 1),);
+        assert_ne!(
+            ShapingCache::cache_key("test", 0),
+            ShapingCache::cache_key("test", 1),
+        );
 
         // Deterministic
-        assert_eq!(cache_key_default("test", 0), cache_key_default("test", 0),);
-    }
-
-    #[test]
-    fn test_shaping_cache_key_includes_shaping_inputs() {
-        let base_key = cache_key_default("test", 0);
-        let feature_on = [Setting::from(("liga", 1))];
-        let feature_off = [Setting::from(("liga", 0))];
-        let vars_regular = [Setting::from(("wght", 400.0))];
-        let vars_bold = [Setting::from(("wght", 700.0))];
-
-        assert_ne!(
-            base_key,
-            ShapingCache::cache_key("test", 0, 18.0, TEST_SCRIPT, &[], &[]),
+        assert_eq!(
+            ShapingCache::cache_key("test", 0),
+            ShapingCache::cache_key("test", 0),
         );
-        assert_ne!(
-            base_key,
-            ShapingCache::cache_key("test", 0, TEST_FONT_SIZE, Script::Greek, &[], &[],),
-        );
-        assert_ne!(
-            ShapingCache::cache_key(
-                "test",
-                0,
-                TEST_FONT_SIZE,
-                TEST_SCRIPT,
-                &feature_on,
-                &[],
-            ),
-            ShapingCache::cache_key(
-                "test",
-                0,
-                TEST_FONT_SIZE,
-                TEST_SCRIPT,
-                &feature_off,
-                &[],
-            ),
-        );
-        assert_ne!(
-            ShapingCache::cache_key(
-                "test",
-                0,
-                TEST_FONT_SIZE,
-                TEST_SCRIPT,
-                &[],
-                &vars_regular,
-            ),
-            ShapingCache::cache_key(
-                "test",
-                0,
-                TEST_FONT_SIZE,
-                TEST_SCRIPT,
-                &[],
-                &vars_bold,
-            ),
-        );
-    }
-
-    #[test]
-    fn test_terminal_grid_shape_features_disable_multi_cell_substitutions() {
-        let features = [Setting::from(("liga", 1)), Setting::from(("kern", 1))];
-        let grid_features = terminal_grid_shape_features(&features);
-
-        let last_feature_value = |tag: &str| {
-            let tag = Setting::from((tag, 0)).tag;
-            grid_features
-                .iter()
-                .rev()
-                .find(|feature| feature.tag == tag)
-                .map(|feature| feature.value)
-        };
-
-        assert_eq!(last_feature_value("kern"), Some(1));
-        for tag in ["liga", "clig", "dlig", "hlig", "calt"] {
-            assert_eq!(last_feature_value(tag), Some(0));
-        }
     }
 
     #[test]
@@ -1986,7 +1737,7 @@ mod tests {
     fn test_empty_run_has_no_glyphs() {
         // Verify push_empty_run creates a run with empty glyphs
         let mut render_data = RenderData::new();
-        let metrics = crate::font_introspector::Metrics {
+        let metrics = swash::Metrics {
             ascent: 12.0,
             descent: 4.0,
             leading: 0.0,
@@ -2001,40 +1752,11 @@ mod tests {
     }
 
     #[test]
-    fn test_push_run_without_shaper_preserves_ligature_cell_advance() {
-        let mut render_data = RenderData::new();
-        let metrics = crate::font_introspector::Metrics {
-            ascent: 12.0,
-            descent: 4.0,
-            leading: 0.0,
-            ..Default::default()
-        };
-        let clusters = vec![create_test_cluster(
-            0,
-            2,
-            create_test_glyph(999, 0.0, 0.0, 8.0),
-        )];
-
-        render_data.push_run_without_shaper(
-            SpanStyle::default(),
-            16.0,
-            0,
-            "=>",
-            &clusters,
-            &metrics,
-        );
-
-        assert_eq!(render_data.runs.len(), 1);
-        assert_eq!(render_data.runs[0].shaped_glyphs.len(), 1);
-        assert_eq!(render_data.runs[0].shaped_glyphs[0].cell_advance, 2);
-    }
-
-    #[test]
     fn test_mixed_text_and_empty_runs_ordering() {
         // Simulates a line like: "ABC" + [empty] + [empty] + "DEF"
         // All runs should be in order and empty runs between text runs
         let mut render_data = RenderData::new();
-        let metrics = crate::font_introspector::Metrics {
+        let metrics = swash::Metrics {
             ascent: 12.0,
             descent: 4.0,
             leading: 0.0,
@@ -2042,17 +1764,16 @@ mod tests {
         };
 
         // Simulate text run "ABC" with 3 glyphs
-        let clusters = vec![
-            create_test_cluster(0, 1, create_test_glyph(65, 0.0, 0.0, 8.0)),
-            create_test_cluster(1, 2, create_test_glyph(66, 0.0, 0.0, 8.0)),
-            create_test_cluster(2, 3, create_test_glyph(67, 0.0, 0.0, 8.0)),
+        let glyphs_abc = [
+            create_test_glyph(65, 0.0, 0.0, 8.0),
+            create_test_glyph(66, 0.0, 0.0, 8.0),
+            create_test_glyph(67, 0.0, 0.0, 8.0),
         ];
         render_data.push_run_without_shaper(
             SpanStyle::default(),
             16.0,
             0,
-            "ABC",
-            &clusters,
+            &glyphs_abc,
             &metrics,
         );
 
@@ -2061,17 +1782,16 @@ mod tests {
         render_data.push_empty_run(SpanStyle::default(), 16.0, 0, &metrics);
 
         // Another text run "DEF"
-        let clusters2 = vec![
-            create_test_cluster(0, 1, create_test_glyph(68, 0.0, 0.0, 8.0)),
-            create_test_cluster(1, 2, create_test_glyph(69, 0.0, 0.0, 8.0)),
-            create_test_cluster(2, 3, create_test_glyph(70, 0.0, 0.0, 8.0)),
+        let glyphs_def = [
+            create_test_glyph(68, 0.0, 0.0, 8.0),
+            create_test_glyph(69, 0.0, 0.0, 8.0),
+            create_test_glyph(70, 0.0, 0.0, 8.0),
         ];
         render_data.push_run_without_shaper(
             SpanStyle::default(),
             16.0,
             0,
-            "DEF",
-            &clusters2,
+            &glyphs_def,
             &metrics,
         );
 
@@ -2091,7 +1811,7 @@ mod tests {
     fn test_empty_run_preserves_background_color() {
         // '\0' cells with colored background (like from \033[K) should preserve bg
         let mut render_data = RenderData::new();
-        let metrics = crate::font_introspector::Metrics {
+        let metrics = swash::Metrics {
             ascent: 12.0,
             descent: 4.0,
             leading: 0.0,
@@ -2141,7 +1861,7 @@ mod tests {
         );
 
         // Simulate what process_text_line does for None fragments
-        let metrics = crate::font_introspector::Metrics {
+        let metrics = swash::Metrics {
             ascent: 12.0,
             descent: 4.0,
             leading: 0.0,
@@ -2224,7 +1944,7 @@ mod tests {
             style,
         });
 
-        let metrics = crate::font_introspector::Metrics {
+        let metrics = swash::Metrics {
             ascent: 12.0,
             descent: 4.0,
             leading: 0.0,

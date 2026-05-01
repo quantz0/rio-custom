@@ -5,6 +5,20 @@ use rio_backend::event::{TerminalDamage, VoidListener, WindowId};
 // This file tests compute function on different layouts.
 // I've added some real scenarios so I can make sure it doesn't go off again.
 
+/// Build a `CellMetrics` whose integer cell stride matches the given
+/// `TextDimensions`. Used by tests that construct dimensions
+/// directly without going through sugarloaf's font path.
+fn cell_for(dims: TextDimensions) -> rio_backend::sugarloaf::layout::CellMetrics {
+    rio_backend::sugarloaf::layout::CellMetrics {
+        cell_width: dims.width.round().max(1.0) as u32,
+        cell_height: dims.height.round().max(1.0) as u32,
+        cell_baseline: 0,
+        face_width: dims.width as f64,
+        face_height: dims.height as f64,
+        face_y: 0.0,
+    }
+}
+
 /// note: Computes the renderer's actual per-line height in physical pixels.
 ///
 /// The renderer gets metrics from Metrics::for_rich_text() which packs
@@ -56,10 +70,11 @@ fn assert_rows_fit(
     let (cols, rows) = compute(
         panel_width,
         panel_height,
-        dimensions,
-        line_height_mod,
+        cell_for(dimensions),
         Margin::all(0.0),
+        scale,
     );
+    let _ = line_height_mod; // line_height already baked into `dimensions.height`.
 
     let actual_line_height =
         renderer_line_height(ascent, descent, leading, line_height_mod, scale);
@@ -169,7 +184,7 @@ fn test_compute_returns_min_for_zero_dimensions() {
         height: 32.0,
         scale: 2.0,
     };
-    let (cols, rows) = compute(0.0, 0.0, dims, 1.0, Margin::all(0.0));
+    let (cols, rows) = compute(0.0, 0.0, cell_for(dims), Margin::all(0.0), 2.0);
     assert_eq!(cols, MIN_COLS);
     assert_eq!(rows, MIN_LINES);
 }
@@ -181,7 +196,7 @@ fn test_compute_returns_min_for_negative_dimensions() {
         height: 32.0,
         scale: 2.0,
     };
-    let (cols, rows) = compute(-100.0, -100.0, dims, 1.0, Margin::all(0.0));
+    let (cols, rows) = compute(-100.0, -100.0, cell_for(dims), Margin::all(0.0), 2.0);
     assert_eq!(cols, MIN_COLS);
     assert_eq!(rows, MIN_LINES);
 }
@@ -193,7 +208,7 @@ fn test_compute_returns_min_for_zero_scale() {
         height: 32.0,
         scale: 0.0,
     };
-    let (cols, rows) = compute(1600.0, 900.0, dims, 1.0, Margin::all(0.0));
+    let (cols, rows) = compute(1600.0, 900.0, cell_for(dims), Margin::all(0.0), 0.0);
     assert_eq!(cols, MIN_COLS);
     assert_eq!(rows, MIN_LINES);
 }
@@ -205,7 +220,7 @@ fn test_compute_basic_grid() {
         height: 33.0,
         scale: 2.0,
     };
-    let (cols, rows) = compute(1600.0, 825.0, dims, 1.0, Margin::all(0.0));
+    let (cols, rows) = compute(1600.0, 825.0, cell_for(dims), Margin::all(0.0), 2.0);
     assert_eq!(cols, 100);
     assert_eq!(rows, 25);
 }
@@ -218,7 +233,7 @@ fn test_compute_floors_fractional_rows() {
         height: 33.0,
         scale: 1.0,
     };
-    let (_, rows) = compute(1600.0, 840.0, dims, 1.0, Margin::all(0.0));
+    let (_, rows) = compute(1600.0, 840.0, cell_for(dims), Margin::all(0.0), 1.0);
     assert_eq!(rows, 25);
 }
 
@@ -230,7 +245,7 @@ fn test_compute_respects_margins() {
         scale: 2.0,
     };
     let margin = Margin::new(0.0, 10.0, 0.0, 10.0);
-    let (cols, _) = compute(1600.0, 800.0, dims, 1.0, margin);
+    let (cols, _) = compute(1600.0, 800.0, cell_for(dims), margin, 2.0);
     // available = 1600 - 10*2 - 10*2 = 1560, cols = 1560/16 = 97
     assert_eq!(cols, 97);
 }
@@ -243,7 +258,7 @@ fn test_compute_margin_exceeds_size() {
         scale: 2.0,
     };
     let margin = Margin::new(0.0, 0.0, 0.0, 1000.0);
-    let (cols, rows) = compute(100.0, 800.0, dims, 1.0, margin);
+    let (cols, rows) = compute(100.0, 800.0, cell_for(dims), margin, 2.0);
     assert_eq!(cols, MIN_COLS);
     assert_eq!(rows, MIN_LINES);
 }
@@ -255,7 +270,14 @@ fn test_context_dimension_build() {
         height: 33.0,
         scale: 2.0,
     };
-    let cd = ContextDimension::build(1650.0, 825.0, dims, 1.0, Margin::all(0.0));
+    let cd = ContextDimension::build(
+        1650.0,
+        825.0,
+        dims,
+        cell_for(dims),
+        1.0,
+        Margin::all(0.0),
+    );
     assert_eq!(cd.columns, 103);
     assert_eq!(cd.lines, 25);
 }
@@ -267,7 +289,14 @@ fn test_context_dimension_update_width() {
         height: 33.0,
         scale: 2.0,
     };
-    let mut cd = ContextDimension::build(1600.0, 825.0, dims, 1.0, Margin::all(0.0));
+    let mut cd = ContextDimension::build(
+        1600.0,
+        825.0,
+        dims,
+        cell_for(dims),
+        1.0,
+        Margin::all(0.0),
+    );
     assert_eq!(cd.columns, 100);
 
     cd.update_width(800.0);
@@ -282,7 +311,14 @@ fn test_context_dimension_update_height() {
         height: 33.0,
         scale: 2.0,
     };
-    let mut cd = ContextDimension::build(1600.0, 825.0, dims, 1.0, Margin::all(0.0));
+    let mut cd = ContextDimension::build(
+        1600.0,
+        825.0,
+        dims,
+        cell_for(dims),
+        1.0,
+        Margin::all(0.0),
+    );
     assert_eq!(cd.lines, 25);
 
     cd.update_height(660.0);
@@ -297,7 +333,14 @@ fn test_context_dimension_update_dimensions() {
         height: 33.0,
         scale: 1.0,
     };
-    let mut cd = ContextDimension::build(1600.0, 825.0, dims, 1.0, Margin::all(0.0));
+    let mut cd = ContextDimension::build(
+        1600.0,
+        825.0,
+        dims,
+        cell_for(dims),
+        1.0,
+        Margin::all(0.0),
+    );
     assert_eq!(cd.lines, 25);
 
     let new_dims = TextDimensions {
@@ -305,7 +348,7 @@ fn test_context_dimension_update_dimensions() {
         height: 66.0,
         scale: 1.0,
     };
-    cd.update_dimensions(new_dims);
+    cd.update_dimensions(new_dims, cell_for(new_dims));
     assert_eq!(cd.lines, 12); // 825/66 = 12.5 → 12
 }
 
@@ -829,8 +872,14 @@ fn test_rich_text_visibility_by_layout_respects_zoomed_panel() {
         height: 20.0,
         scale: 1.0,
     };
-    let dimension =
-        ContextDimension::build(1210.0, 900.0, text_dimensions, 1.0, Margin::all(0.0));
+    let dimension = ContextDimension::build(
+        1210.0,
+        900.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        Margin::all(0.0),
+    );
     let panel_config = rio_backend::config::layout::Panel {
         margin: Margin::all(0.0),
         padding: Margin::all(0.0),
@@ -878,8 +927,14 @@ fn test_select_split_right_uses_absolute_panel_positions_for_nested_splits() {
         height: 20.0,
         scale: 1.0,
     };
-    let dimension =
-        ContextDimension::build(1210.0, 900.0, text_dimensions, 1.0, Margin::all(0.0));
+    let dimension = ContextDimension::build(
+        1210.0,
+        900.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        Margin::all(0.0),
+    );
     let panel_config = rio_backend::config::layout::Panel {
         margin: Margin::all(0.0),
         padding: Margin::all(0.0),
@@ -943,8 +998,14 @@ fn test_select_split_right_respects_panel_margins_without_explicit_gap() {
         height: 20.0,
         scale: 1.0,
     };
-    let dimension =
-        ContextDimension::build(1210.0, 900.0, text_dimensions, 1.0, Margin::all(0.0));
+    let dimension = ContextDimension::build(
+        1210.0,
+        900.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        Margin::all(0.0),
+    );
     let panel_config = rio_backend::config::layout::Panel {
         padding: Margin::all(0.0),
         ..rio_backend::config::layout::Panel::default()
@@ -986,8 +1047,14 @@ fn test_select_split_down_respects_panel_margins_without_explicit_gap() {
         height: 20.0,
         scale: 1.0,
     };
-    let dimension =
-        ContextDimension::build(1210.0, 900.0, text_dimensions, 1.0, Margin::all(0.0));
+    let dimension = ContextDimension::build(
+        1210.0,
+        900.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        Margin::all(0.0),
+    );
     let panel_config = rio_backend::config::layout::Panel {
         padding: Margin::all(0.0),
         ..rio_backend::config::layout::Panel::default()
@@ -1029,8 +1096,14 @@ fn test_split_right_terminal_columns_use_panel_content_width() {
         height: 20.0,
         scale: 1.0,
     };
-    let dimension =
-        ContextDimension::build(120.0, 100.0, text_dimensions, 1.0, Margin::all(0.0));
+    let dimension = ContextDimension::build(
+        120.0,
+        100.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        Margin::all(0.0),
+    );
     let panel_config = rio_backend::config::layout::Panel {
         margin: Margin::all(0.0),
         padding: Margin::all(5.0),
@@ -1082,8 +1155,14 @@ fn test_split_down_terminal_rows_use_panel_content_height() {
         height: 20.0,
         scale: 1.0,
     };
-    let dimension =
-        ContextDimension::build(120.0, 100.0, text_dimensions, 1.0, Margin::all(0.0));
+    let dimension = ContextDimension::build(
+        120.0,
+        100.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        Margin::all(0.0),
+    );
     let panel_config = rio_backend::config::layout::Panel {
         margin: Margin::all(0.0),
         padding: Margin::all(5.0),
@@ -1139,8 +1218,14 @@ fn test_updated_top_margin_reduces_split_root_height() {
         scale: 1.0,
     };
     let initial_margin = Margin::new(4.0, 4.0, 4.0, 4.0);
-    let dimension =
-        ContextDimension::build(1920.0, 1009.0, text_dimensions, 1.0, initial_margin);
+    let dimension = ContextDimension::build(
+        1920.0,
+        1009.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        initial_margin,
+    );
     let panel_config = rio_backend::config::layout::Panel {
         margin: Margin::all(2.0),
         padding: Margin::all(5.0),
@@ -1204,8 +1289,14 @@ fn test_border_hit_does_not_cover_right_panel_first_cell() {
         height: 20.0,
         scale: 1.0,
     };
-    let dimension =
-        ContextDimension::build(120.0, 100.0, text_dimensions, 1.0, Margin::all(0.0));
+    let dimension = ContextDimension::build(
+        120.0,
+        100.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        Margin::all(0.0),
+    );
     let mut grid = ContextGrid::new(
         create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
         Margin::all(0.0),
@@ -1250,8 +1341,14 @@ fn test_border_hit_still_works_in_split_gap() {
         height: 20.0,
         scale: 1.0,
     };
-    let dimension =
-        ContextDimension::build(120.0, 100.0, text_dimensions, 1.0, Margin::all(0.0));
+    let dimension = ContextDimension::build(
+        120.0,
+        100.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        Margin::all(0.0),
+    );
     let mut grid = ContextGrid::new(
         create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
         Margin::all(0.0),
@@ -1294,8 +1391,14 @@ fn test_update_panel_config_refreshes_existing_split_layout() {
         height: 20.0,
         scale: 1.0,
     };
-    let dimension =
-        ContextDimension::build(120.0, 100.0, text_dimensions, 1.0, Margin::all(0.0));
+    let dimension = ContextDimension::build(
+        120.0,
+        100.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        Margin::all(0.0),
+    );
     let mut grid = ContextGrid::new(
         create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
         Margin::all(0.0),
@@ -1358,8 +1461,14 @@ fn test_update_scale_refreshes_existing_split_spacing() {
         height: 20.0,
         scale: 1.0,
     };
-    let dimension =
-        ContextDimension::build(120.0, 100.0, text_dimensions, 1.0, Margin::all(0.0));
+    let dimension = ContextDimension::build(
+        120.0,
+        100.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        Margin::all(0.0),
+    );
     let panel_config = rio_backend::config::layout::Panel {
         margin: Margin::all(1.0),
         padding: Margin::all(5.0),
@@ -1411,8 +1520,14 @@ fn test_invalidate_visible_panels_for_full_redraw_marks_all_split_panels_dirty()
         height: 20.0,
         scale: 1.0,
     };
-    let dimension =
-        ContextDimension::build(1210.0, 900.0, text_dimensions, 1.0, Margin::all(0.0));
+    let dimension = ContextDimension::build(
+        1210.0,
+        900.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        Margin::all(0.0),
+    );
     let mut grid = ContextGrid::new(
         create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
         Margin::all(0.0),
