@@ -918,6 +918,79 @@ fn test_rich_text_visibility_by_layout_respects_zoomed_panel() {
     assert_eq!(visibility.get(&202), Some(&true));
     assert!(grid.is_node_visible(right));
     assert!(!grid.is_node_visible(left));
+
+    let visible = grid.visible_context_keys();
+    assert_eq!(visible, vec![right]);
+}
+
+#[test]
+fn test_invalidate_visible_panels_skips_hidden_zoomed_split() {
+    let text_dimensions = TextDimensions {
+        width: 10.0,
+        height: 20.0,
+        scale: 1.0,
+    };
+    let dimension = ContextDimension::build(
+        1210.0,
+        900.0,
+        text_dimensions,
+        cell_for(text_dimensions),
+        1.0,
+        Margin::all(0.0),
+    );
+    let mut grid = ContextGrid::new(
+        create_dead_context(VoidListener, WindowId::from(0), 1, 1, dimension),
+        Margin::all(0.0),
+        [0.0, 0.0, 0.0, 1.0],
+        [0.0, 0.0, 0.0, 1.0],
+        rio_backend::config::layout::Panel::default(),
+    );
+
+    let left = grid.current;
+    let right = grid.try_split_right().unwrap();
+    grid.inner.insert(
+        right,
+        ContextGridItem::new(create_dead_context(
+            VoidListener,
+            WindowId::from(0),
+            2,
+            2,
+            dimension,
+        )),
+    );
+    grid.calculate_positions();
+
+    for item in grid.contexts_mut().values_mut() {
+        item.val.renderable_content.pending_update.reset();
+    }
+
+    let snapshot = capture_tree_styles(&grid.tree, grid.root_node).unwrap();
+    apply_zoomed_panel_styles(&mut grid.tree, grid.root_node, right, &snapshot).unwrap();
+
+    grid.invalidate_visible_panels_for_full_redraw();
+
+    let left_pending = &mut grid
+        .contexts_mut()
+        .get_mut(&left)
+        .unwrap()
+        .val
+        .renderable_content
+        .pending_update;
+    assert!(!left_pending.is_dirty());
+    assert_eq!(left_pending.take_terminal_damage(), None);
+
+    let right_pending = &mut grid
+        .contexts_mut()
+        .get_mut(&right)
+        .unwrap()
+        .val
+        .renderable_content
+        .pending_update;
+    assert!(right_pending.is_dirty());
+    assert_eq!(
+        right_pending.take_terminal_damage(),
+        Some(TerminalDamage::Full)
+    );
 }
 
 #[test]

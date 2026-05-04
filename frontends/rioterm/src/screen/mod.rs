@@ -3930,9 +3930,13 @@ impl Screen<'_> {
                 )>,
             }
 
-            let (active_key, scaled_margin) = {
+            let (active_key, scaled_margin, visible_keys) = {
                 let grid = self.context_manager.current_grid();
-                (grid.current, grid.scaled_margin)
+                (
+                    grid.current,
+                    grid.scaled_margin,
+                    grid.visible_context_keys(),
+                )
             };
             // Snapshot the window's focused search match before the
             // per-context borrow below. `search_state` lives on
@@ -3946,6 +3950,9 @@ impl Screen<'_> {
                 .contexts_mut()
                 .iter_mut()
             {
+                if !visible_keys.contains(key) {
+                    continue;
+                }
                 let ctx = &mut item.val;
                 let dim = ctx.dimension;
                 // Canonical integer cell stride — single source of

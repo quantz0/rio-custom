@@ -243,9 +243,13 @@ impl Renderer {
         }
 
         // Update per-panel scroll state for scrollbar rendering (all panels, not just dirty ones)
+        let visible_keys = grid.visible_context_keys();
         if self.scrollbar.is_enabled() {
             self.scrollbar.clear_panel_states();
-            for grid_context in grid.contexts_mut().values() {
+            for (key, grid_context) in grid.contexts_mut().iter() {
+                if !visible_keys.contains(key) {
+                    continue;
+                }
                 let panel_rect = grid_context.terminal_rect;
                 let ctx = grid_context.context();
                 let terminal = ctx.terminal.lock();
@@ -261,6 +265,9 @@ impl Renderer {
         }
 
         for (key, grid_context) in grid.contexts_mut().iter_mut() {
+            if !visible_keys.contains(key) {
+                continue;
+            }
             let is_active = &active_key == key;
             let terminal_rect = grid_context.terminal_rect;
             let context = grid_context.context_mut();
@@ -562,6 +569,9 @@ impl Renderer {
                 1.0 - self.unfocused_split_opacity,
             ];
             for (key, grid_context) in grid.contexts_mut().iter() {
+                if !visible_keys.contains(key) {
+                    continue;
+                }
                 if &active_key == key {
                     continue;
                 }

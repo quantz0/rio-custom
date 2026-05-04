@@ -378,6 +378,15 @@ impl<T: rio_backend::event::EventListener> ContextGrid<T> {
             .unwrap_or(false)
     }
 
+    #[inline]
+    pub fn visible_context_keys(&self) -> Vec<NodeId> {
+        self.inner
+            .keys()
+            .copied()
+            .filter(|node_id| self.is_node_visible(*node_id))
+            .collect()
+    }
+
     fn try_update_size(&mut self, width: f32, height: f32) -> Result<(), TaffyError> {
         // Subtract window margin from available size
         let available_width = width - self.scaled_margin.left - self.scaled_margin.right;
