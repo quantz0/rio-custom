@@ -228,9 +228,16 @@ impl Screen<'_> {
                 // on; otherwise we degrade to CPU rasterizer.
                 #[cfg(target_os = "linux")]
                 Backend::Vulkan => SugarloafBackend::Vulkan,
-                #[cfg(all(not(target_os = "linux"), feature = "wgpu"))]
+                #[cfg(any(
+                    all(not(target_os = "linux"), feature = "wgpu"),
+                    target_os = "windows"
+                ))]
                 Backend::Vulkan => SugarloafBackend::Wgpu(wgpu::Backends::VULKAN),
-                #[cfg(all(not(target_os = "linux"), not(feature = "wgpu")))]
+                #[cfg(all(
+                    not(target_os = "linux"),
+                    not(target_os = "windows"),
+                    not(feature = "wgpu")
+                ))]
                 Backend::Vulkan => SugarloafBackend::Cpu,
                 #[cfg(target_os = "macos")]
                 Backend::Metal => SugarloafBackend::Metal,
@@ -238,9 +245,12 @@ impl Screen<'_> {
                 Backend::Webgpu => SugarloafBackend::Wgpu(
                     wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
                 ),
-                #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
+                #[cfg(any(
+                    all(feature = "wgpu", not(target_arch = "wasm32")),
+                    target_os = "windows"
+                ))]
                 Backend::Webgpu => SugarloafBackend::Wgpu(wgpu::Backends::all()),
-                #[cfg(not(feature = "wgpu"))]
+                #[cfg(all(not(target_os = "windows"), not(feature = "wgpu")))]
                 Backend::Webgpu => SugarloafBackend::Cpu,
             }
         };
@@ -3851,7 +3861,7 @@ impl Screen<'_> {
         {
             struct PanelFrame {
                 route_id: usize,
-                layout_rect: [f32; 4],
+                terminal_rect: [f32; 4],
                 cols: u32,
                 rows: u32,
                 cell_w: f32,
@@ -4014,7 +4024,7 @@ impl Screen<'_> {
                     .unwrap_or(self.renderer.named_colors.cursor);
                 panels.push(PanelFrame {
                     route_id: ctx.route_id,
-                    layout_rect: item.layout_rect,
+                    terminal_rect: item.terminal_rect,
                     cols: dim.columns.max(1) as u32,
                     rows: dim.lines.max(1) as u32,
                     cell_w,
@@ -4242,18 +4252,24 @@ impl Screen<'_> {
                 }
 
                 // Panel's grid origin in drawable-pixel space =
-                // window scaled_margin + the panel's layout rect
-                // offset inside the root container. Snap to integer
-                // pixels so `cell_size * grid_pos + grid_padding`
-                // always lands on pixel boundaries. Without this, a
-                // fractional margin (e.g. Taffy layout computing
-                // 10.5px offsets) shifts the whole grid half a pixel
-                // and the bg fragment's
+                // window scaled_margin + the panel content rect
+                // offset inside the root container. Use
+                // `terminal_rect`, not the outer `layout_rect`, so
+                // grid cell backgrounds, cursor blocks, selections,
+                // and search highlights stay inside the panel content
+                // area instead of painting into split padding,
+                // margins, or the separator.
+                //
+                // Snap to integer pixels so `cell_size * grid_pos +
+                // grid_padding` always lands on pixel boundaries.
+                // Without this, a fractional margin (e.g. Taffy
+                // layout computing 10.5px offsets) shifts the whole
+                // grid half a pixel and the bg fragment's
                 // `floor((pixel - padding) / cell_size)` disagrees
                 // with the text vertex's `cell_size * grid_pos`
-                // about where cell boundaries are → visible seams.
-                let panel_left = (scaled_margin.left + p.layout_rect[0]).round();
-                let panel_top = (scaled_margin.top + p.layout_rect[1]).round();
+                // about where cell boundaries are -> visible seams.
+                let panel_left = (scaled_margin.left + p.terminal_rect[0]).round();
+                let panel_top = (scaled_margin.top + p.terminal_rect[1]).round();
 
                 // Bg-tint uniforms fire ONLY for the active block
                 // style — the bg shader paints the cursor cell in

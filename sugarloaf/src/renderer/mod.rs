@@ -1904,44 +1904,6 @@ impl Renderer {
                 return;
             }
 
-            // Background image: drawn first so all subsequent text/rects
-            // composite on top. Single fullscreen instance, dedicated
-            // vertex buffer, reuses the kitty image pipeline + sampler.
-            if let Some(bg_tex) = background_image_texture.as_ref() {
-                if let ImageTexture::Wgpu { view, .. } = &bg_tex.gpu {
-                    let instance = ImageInstance {
-                        dest_pos: [0.0, 0.0],
-                        dest_size: [ctx.size.width, ctx.size.height],
-                        source_rect: [0.0, 0.0, 1.0, 1.0],
-                    };
-                    ctx.queue.write_buffer(
-                        &brush.background_image_vertex_buffer,
-                        0,
-                        bytemuck::bytes_of(&instance),
-                    );
-                    let bg_bind =
-                        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("background image bind group"),
-                            layout: &brush.image_bind_group_layout,
-                            entries: &[wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(view),
-                            }],
-                        });
-                    rpass.set_pipeline(&brush.image_pipeline);
-                    rpass.set_bind_group(0, &brush.constant_bind_group, &[]);
-                    rpass.set_bind_group(1, &bg_bind, &[]);
-                    rpass.set_vertex_buffer(
-                        0,
-                        brush.background_image_vertex_buffer.slice(..),
-                    );
-                    rpass.draw(0..4, 0..1);
-                    // Restore text pipeline state for downstream batches.
-                    rpass.set_pipeline(&brush.pipeline);
-                    rpass.set_bind_group(0, &brush.constant_bind_group, &[]);
-                }
-            }
-
             if has_images && image_draws.iter().any(|d| d.layer == ImageLayer::BelowText)
             {
                 // Each draw must use a unique slot in the shared vertex
@@ -2162,6 +2124,50 @@ impl Renderer {
                 }
             }
         }
+    }
+
+    /// Draw the configured window background image in the active WGPU
+    /// render pass. Call this before per-panel grid backgrounds so
+    /// default-background cells can show the image through.
+    #[cfg(feature = "wgpu")]
+    pub fn render_background_image_wgpu(
+        &mut self,
+        ctx: &crate::context::webgpu::WgpuContext,
+        rpass: &mut wgpu::RenderPass<'_>,
+    ) {
+        let (brush_type, background_image_texture) =
+            (&mut self.brush_type, &self.background_image_texture);
+        let RendererType::Wgpu(brush) = brush_type else {
+            return;
+        };
+        let Some(bg_tex) = background_image_texture.as_ref() else {
+            return;
+        };
+        let ImageTexture::Wgpu { view, .. } = &bg_tex.gpu;
+
+        let instance = ImageInstance {
+            dest_pos: [0.0, 0.0],
+            dest_size: [ctx.size.width, ctx.size.height],
+            source_rect: [0.0, 0.0, 1.0, 1.0],
+        };
+        ctx.queue.write_buffer(
+            &brush.background_image_vertex_buffer,
+            0,
+            bytemuck::bytes_of(&instance),
+        );
+        let bg_bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("background image bind group"),
+            layout: &brush.image_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            }],
+        });
+        rpass.set_pipeline(&brush.image_pipeline);
+        rpass.set_bind_group(0, &brush.constant_bind_group, &[]);
+        rpass.set_bind_group(1, &bg_bind, &[]);
+        rpass.set_vertex_buffer(0, brush.background_image_vertex_buffer.slice(..));
+        rpass.draw(0..4, 0..1);
     }
 
     /// Drive an entire Metal frame: acquire a pooled buffer, encode all
@@ -2523,23 +2529,36 @@ impl Renderer {
             .collect();
 
         if let RendererType::Vulkan(brush) = &mut self.brush_type {
-            if let Some(bg) = &self.background_image_texture {
-                if let ImageTexture::Vulkan(tex) = &bg.gpu {
-                    brush.render_background_image(
-                        cmd,
-                        slot,
-                        viewport,
-                        tex.descriptor_set,
-                    );
-                }
-            }
-
             brush.render_image_overlays(cmd, slot, viewport, &below);
             brush.render_quads(cmd, slot, viewport, &self.instances);
             brush.render_geometry(cmd, slot, viewport, &self.vertices);
             brush.render_image_overlays(cmd, slot, viewport, &above);
             brush.draw_bootstrap(cmd);
         }
+    }
+
+    /// Draw the configured window background image in the active Vulkan
+    /// render pass. Call this before per-panel grid backgrounds so
+    /// default-background cells can show the image through.
+    #[cfg(target_os = "linux")]
+    pub fn render_background_image_vulkan(
+        &mut self,
+        cmd: ash::vk::CommandBuffer,
+        frame: &crate::context::vulkan::VulkanFrame,
+    ) {
+        let viewport = [frame.extent.width as f32, frame.extent.height as f32];
+        let slot = frame.slot;
+        let (brush_type, background_image_texture) =
+            (&mut self.brush_type, &self.background_image_texture);
+        let RendererType::Vulkan(brush) = brush_type else {
+            return;
+        };
+        let Some(bg) = background_image_texture.as_ref() else {
+            return;
+        };
+        let ImageTexture::Vulkan(tex) = &bg.gpu;
+
+        brush.render_background_image(cmd, slot, viewport, tex.descriptor_set);
     }
 
     /// Vertices accumulated for the current frame (CPU rasterizer reads these).

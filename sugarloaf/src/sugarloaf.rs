@@ -1320,10 +1320,15 @@ impl Sugarloaf<'_> {
             device.cmd_set_scissor(cmd, 0, &[scissor]);
         }
 
+        // Window background image sits below terminal cell backgrounds
+        // and text. Default-background cells can be transparent, while
+        // explicit SGR backgrounds still paint over it.
+        self.renderer.render_background_image_vulkan(cmd, &frame);
+
         // Per-panel grid passes — draw cell backgrounds + grid text
-        // underneath everything else. Vulkan doesn't yet interleave
-        // kitty image layers around the bg/text split — same as the
-        // wgpu path; follow-up.
+        // underneath rich-text UI overlays. Vulkan doesn't yet
+        // interleave kitty image layers around the bg/text split —
+        // same as the wgpu path; follow-up.
         for (grid, uniforms) in grids.iter_mut() {
             grid.render_bg_vulkan(ctx, cmd, frame.slot, uniforms);
             grid.render_text_vulkan(ctx, cmd, frame.slot, uniforms);
@@ -1403,17 +1408,22 @@ impl Sugarloaf<'_> {
                             multiview_mask: None,
                         });
 
-                    // Grid passes first — cell bg/text composite under
-                    // the rich-text UI overlays drawn below. Wgpu
-                    // doesn't yet interleave kitty image layers with
-                    // the grid bg/text split (BrushRenderer::render
-                    // owns kitty image draws inline), so for now the
-                    // bg+text passes run back-to-back per panel —
-                    // same visual result as the prior single render
-                    // call. Re-ordering kitty layers around the
-                    // bg/text split would require pulling image
-                    // draws out of BrushRenderer::render — Metal
-                    // already does that; wgpu follow-up.
+                    // Window background image sits below terminal
+                    // cell backgrounds and text. Default-background
+                    // cells can be transparent, while explicit SGR
+                    // backgrounds still paint over it.
+                    self.renderer.render_background_image_wgpu(ctx, &mut rpass);
+
+                    // Grid passes first — cell bg/text composite
+                    // under the rich-text UI overlays drawn below.
+                    // Wgpu doesn't yet interleave kitty image layers
+                    // with the grid bg/text split
+                    // (BrushRenderer::render owns kitty image draws
+                    // inline), so for now the bg+text passes run
+                    // back-to-back per panel. Re-ordering kitty
+                    // layers around the bg/text split would require
+                    // pulling image draws out of BrushRenderer::render
+                    // — Metal already does that; wgpu follow-up.
                     for (grid, uniforms) in grids.iter_mut() {
                         grid.render_bg_wgpu(&mut rpass, uniforms);
                         grid.render_text_wgpu(&mut rpass, uniforms);

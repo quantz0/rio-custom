@@ -23,6 +23,7 @@
 //! `font::shaper::run::RunIterator`.
 
 use rio_backend::config::colors::term::TermColors;
+use rio_backend::config::colors::{AnsiColor, NamedColor};
 use rio_backend::crosswords::grid::row::Row;
 use rio_backend::crosswords::pos::{Column, Line, Pos};
 use rio_backend::crosswords::search::Match;
@@ -855,6 +856,11 @@ pub fn cell_bg(
             let mut style = style_set.get(sq.style_id());
             if style.flags.contains(StyleFlags::INVERSE) {
                 std::mem::swap(&mut style.fg, &mut style.bg);
+            }
+            if renderer.has_background_image
+                && matches!(style.bg, AnsiColor::Named(NamedColor::Background))
+            {
+                return [0, 0, 0, 0];
             }
             renderer.compute_bg_color(&style, term_colors)
         }
@@ -1973,4 +1979,61 @@ fn font_library_hinting(_r: &GridGlyphRasterizer) -> bool {
     // For now the lock on swash rasterize is a small fraction of
     // render time; optimise if profiling flags it.
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rio_backend::config::Config;
+    use rio_backend::crosswords::style::StyleSet;
+    use rio_backend::sugarloaf::ImageProperties;
+
+    fn renderer_with_background_image(enabled: bool) -> Renderer {
+        let mut config = Config::default();
+        if enabled {
+            config.window.background_image = Some(ImageProperties {
+                path: "background.png".to_string(),
+                opacity: 1.0,
+            });
+        }
+        Renderer::new(&config)
+    }
+
+    #[test]
+    fn default_background_cell_is_transparent_with_background_image() {
+        let renderer = renderer_with_background_image(true);
+        let style_set = StyleSet::default();
+        let term_colors = TermColors::default();
+
+        assert_eq!(
+            cell_bg(Square::default(), &style_set, &renderer, &term_colors),
+            [0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn default_background_cell_stays_opaque_without_background_image() {
+        let renderer = renderer_with_background_image(false);
+        let style_set = StyleSet::default();
+        let term_colors = TermColors::default();
+
+        assert_eq!(
+            cell_bg(Square::default(), &style_set, &renderer, &term_colors),
+            normalized_to_u8(renderer.named_colors.background.0)
+        );
+    }
+
+    #[test]
+    fn explicit_background_cell_stays_opaque_with_background_image() {
+        let renderer = renderer_with_background_image(true);
+        let style_set = StyleSet::default();
+        let term_colors = TermColors::default();
+        let mut square = Square::default();
+        square.set_bg_rgb(1, 2, 3);
+
+        assert_eq!(
+            cell_bg(square, &style_set, &renderer, &term_colors),
+            [1, 2, 3, 255]
+        );
+    }
 }

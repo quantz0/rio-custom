@@ -47,6 +47,7 @@ pub struct Renderer {
     /// `set_background_color`. Lets the per-frame "derive bg from
     /// active panel's OSC state" loop avoid redundant resyncs.
     last_window_bg: Option<rio_backend::sugarloaf::Color>,
+    pub has_background_image: bool,
     pub config_has_blinking_enabled: bool,
     pub config_blinking_interval: u64,
     pub(crate) ignore_selection_fg_color: bool,
@@ -115,6 +116,7 @@ impl Renderer {
             },
             named_colors,
             dynamic_background,
+            has_background_image: config.window.background_image.is_some(),
             search: search::SearchOverlay::default(),
             assistant: assistant::AssistantOverlay::default(),
             scrollbar: scrollbar::Scrollbar::new(config.enable_scroll_bar),
@@ -244,7 +246,7 @@ impl Renderer {
         if self.scrollbar.is_enabled() {
             self.scrollbar.clear_panel_states();
             for grid_context in grid.contexts_mut().values() {
-                let panel_rect = grid_context.layout_rect;
+                let panel_rect = grid_context.terminal_rect;
                 let ctx = grid_context.context();
                 let terminal = ctx.terminal.lock();
                 self.scrollbar
@@ -260,7 +262,7 @@ impl Renderer {
 
         for (key, grid_context) in grid.contexts_mut().iter_mut() {
             let is_active = &active_key == key;
-            let panel_rect = grid_context.layout_rect;
+            let terminal_rect = grid_context.terminal_rect;
             let context = grid_context.context_mut();
 
             let mut has_ime = false;
@@ -386,8 +388,8 @@ impl Renderer {
                 // grid uniform paints with.
                 let cell_width = layout.cell.cell_width as f32;
                 let cell_height = layout.cell.cell_height as f32;
-                let origin_x = panel_rect[0] + grid_scaled_margin.left;
-                let origin_y = panel_rect[1] + grid_scaled_margin.top;
+                let origin_x = terminal_rect[0] + grid_scaled_margin.left;
+                let origin_y = terminal_rect[1] + grid_scaled_margin.top;
 
                 let overlays = sugarloaf
                     .image_overlays
@@ -578,9 +580,9 @@ impl Renderer {
                 let cols = dim.columns.max(1) as f32;
                 let rows = dim.lines.max(1) as f32;
                 let panel_left =
-                    (grid_context.layout_rect[0] + grid_scaled_margin.left).round();
+                    (grid_context.terminal_rect[0] + grid_scaled_margin.left).round();
                 let panel_top =
-                    (grid_context.layout_rect[1] + grid_scaled_margin.top).round();
+                    (grid_context.terminal_rect[1] + grid_scaled_margin.top).round();
                 let x = panel_left / scale_factor;
                 let y = panel_top / scale_factor;
                 let w = (cols * cell_w) / scale_factor;
