@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::path::Path;
 
 use crate::dpi::PhysicalSize;
-use crate::event::DeviceId;
+use crate::event::{DeviceId, KeyEvent};
 use crate::event_loop::EventLoopBuilder;
 use crate::monitor::MonitorHandle;
 use crate::window::{BadIcon, Icon, Window, WindowAttributes};
@@ -18,6 +18,32 @@ pub type HWND = *mut c_void;
 pub type HMENU = *mut c_void;
 /// Monitor Handle type used by Win32 API
 pub type HMONITOR = *mut c_void;
+
+/// Windows keyboard metadata used by ConPTY win32-input-mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Win32KeyEvent {
+    pub virtual_key_code: u16,
+    pub virtual_scan_code: u16,
+    pub control_key_state: u32,
+    pub repeat_count: u16,
+}
+
+/// Additional Windows-specific keyboard fields.
+pub trait KeyEventExtWindows {
+    fn win32_key_event(&self) -> Win32KeyEvent;
+}
+
+impl KeyEventExtWindows for KeyEvent {
+    #[inline]
+    fn win32_key_event(&self) -> Win32KeyEvent {
+        Win32KeyEvent {
+            virtual_key_code: self.platform_specific.win32_virtual_key_code,
+            virtual_scan_code: self.platform_specific.win32_virtual_scan_code,
+            control_key_state: self.platform_specific.win32_control_key_state,
+            repeat_count: self.platform_specific.win32_repeat_count,
+        }
+    }
+}
 
 /// Describes a system-drawn backdrop material of a window.
 ///

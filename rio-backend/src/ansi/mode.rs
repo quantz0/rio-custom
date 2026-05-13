@@ -69,6 +69,7 @@ impl PrivateMode {
             1049 => Self::Named(NamedPrivateMode::SwapScreenAndSetRestoreCursor),
             2004 => Self::Named(NamedPrivateMode::BracketedPaste),
             2026 => Self::Named(NamedPrivateMode::SyncUpdate),
+            9001 => Self::Named(NamedPrivateMode::Win32InputMode),
             _ => Self::Unknown(mode),
         }
     }
@@ -120,6 +121,8 @@ pub enum NamedPrivateMode {
     BracketedPaste = 2004,
     /// The mode is handled automatically by [`Processor`].
     SyncUpdate = 2026,
+    /// Windows ConPTY input record encoding.
+    Win32InputMode = 9001,
 }
 
 /// Mode for clearing line.
@@ -157,4 +160,22 @@ pub enum TabulationClearMode {
     Current,
     /// Clear all stops.
     All,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NamedPrivateMode, PrivateMode};
+
+    #[test]
+    fn private_mode_9001_maps_to_win32_input_mode() {
+        assert_eq!(
+            PrivateMode::new(9001),
+            PrivateMode::Named(NamedPrivateMode::Win32InputMode)
+        );
+    }
+
+    #[test]
+    fn unknown_private_mode_stays_unknown() {
+        assert_eq!(PrivateMode::new(9000), PrivateMode::Unknown(9000));
+    }
 }

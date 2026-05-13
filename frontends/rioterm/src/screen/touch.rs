@@ -8,7 +8,6 @@ use std::{collections::HashSet, mem};
 
 use rio_window::event::{ElementState, MouseButton, Touch, TouchPhase};
 
-use crate::bindings::FontSizeAction;
 use crate::event::ClickState;
 use crate::router::Route;
 
@@ -18,69 +17,12 @@ pub enum TouchPurpose {
     None,
     Select(Touch),
     Scroll(Touch),
-    Zoom(TouchZoom),
     Tap(Touch),
     Invalid(HashSet<u64, RandomState>),
 }
 
-const FONT_SIZE_STEP: f32 = 1.00;
-
-/// Touch zoom speed.
-const TOUCH_ZOOM_FACTOR: f32 = 1.0;
-
 /// Distance before a touch input is considered a drag.
 pub const MAX_TAP_DISTANCE: f64 = 5.;
-
-/// Touch zooming state.
-#[derive(Debug)]
-pub struct TouchZoom {
-    slots: (Touch, Touch),
-    fractions: f32,
-}
-
-impl TouchZoom {
-    pub fn new(slots: (Touch, Touch)) -> Self {
-        Self {
-            slots,
-            fractions: Default::default(),
-        }
-    }
-
-    /// Get slot distance change since last update.
-    pub fn font_delta(&mut self, slot: Touch) -> f32 {
-        let old_distance = self.distance();
-
-        // Update touch slots.
-        if slot.id == self.slots.0.id {
-            self.slots.0 = slot;
-        } else {
-            self.slots.1 = slot;
-        }
-
-        // Calculate font change in `FONT_SIZE_STEP` increments.
-        let delta = (self.distance() - old_distance) * TOUCH_ZOOM_FACTOR + self.fractions;
-        let font_delta =
-            (delta.abs() / FONT_SIZE_STEP).floor() * FONT_SIZE_STEP * delta.signum();
-        self.fractions = delta - font_delta;
-
-        font_delta
-    }
-
-    /// Get active touch slots.
-    pub fn slots(&self) -> HashSet<u64, RandomState> {
-        let mut set = HashSet::default();
-        set.insert(self.slots.0.id);
-        set.insert(self.slots.1.id);
-        set
-    }
-
-    /// Calculate distance between slots.
-    fn distance(&self) -> f32 {
-        let delta_x = self.slots.0.location.x - self.slots.1.location.x;
-        let delta_y = self.slots.0.location.y - self.slots.1.location.y;
-        delta_x.hypot(delta_y) as f32
-    }
-}
 
 #[inline]
 pub fn on_touch(
@@ -108,11 +50,15 @@ fn on_touch_start(
     let touch_purpose = route.window.screen.touch_purpose();
     *touch_purpose = match mem::take(touch_purpose) {
         TouchPurpose::None => TouchPurpose::Tap(touch),
-        TouchPurpose::Tap(start) => TouchPurpose::Zoom(TouchZoom::new((start, touch))),
-        TouchPurpose::Zoom(zoom) => TouchPurpose::Invalid(zoom.slots()),
         TouchPurpose::Scroll(event) | TouchPurpose::Select(event) => {
             let mut set = HashSet::default();
             set.insert(event.id);
+            TouchPurpose::Invalid(set)
+        }
+        TouchPurpose::Tap(start) => {
+            let mut set = HashSet::default();
+            set.insert(start.id);
+            set.insert(touch.id);
             TouchPurpose::Invalid(set)
         }
         TouchPurpose::Invalid(mut slots) => {
@@ -173,21 +119,6 @@ fn on_touch_motion(
                 tracing::info!("tap normal");
             }
         }
-        TouchPurpose::Zoom(zoom) => {
-            let font_delta = zoom.font_delta(touch);
-            if font_delta >= 0. {
-                route
-                    .window
-                    .screen
-                    .change_font_size(FontSizeAction::Increase);
-            } else {
-                route
-                    .window
-                    .screen
-                    .change_font_size(FontSizeAction::Decrease);
-            }
-            tracing::info!("zoom motion: {}", font_delta);
-        }
         TouchPurpose::Scroll(last_touch) => {
             // Calculate delta and update last touch position.
             let delta_y = touch.location.y - last_touch.location.y;
@@ -243,13 +174,6 @@ fn on_touch_end(
             route.window.screen.mouse.click_state = ClickState::None;
             route.window.screen.mouse.left_button_state = ElementState::Released;
             tracing::info!("tap end");
-        }
-        // Invalidate zoom once a finger was released.
-        TouchPurpose::Zoom(zoom) => {
-            let mut slots = zoom.slots();
-            slots.remove(&touch.id);
-            *touch_purpose = TouchPurpose::Invalid(slots);
-            tracing::info!("zoom end");
         }
         // Reset touch state once all slots were released.
         TouchPurpose::Invalid(slots) => {

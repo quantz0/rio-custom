@@ -1169,7 +1169,7 @@ fn is_run_breaker(sq: Square) -> bool {
         return true;
     }
     let ch = sq.c();
-    ch == '\0' || ch == ' '
+    ch == '\0' || ch.is_whitespace()
 }
 
 /// Lookup. Hash → bucket; scan from most-recent; rotate on hit. No
@@ -2035,5 +2035,25 @@ mod tests {
             cell_bg(square, &style_set, &renderer, &term_colors),
             [1, 2, 3, 255]
         );
+    }
+
+    #[test]
+    fn unicode_space_cells_are_run_breakers() {
+        let mut square = Square::default();
+
+        square.set_c('\0');
+        assert!(is_run_breaker(square));
+
+        square.set_c(' ');
+        assert!(is_run_breaker(square));
+
+        square.set_c('\u{2002}');
+        assert!(is_run_breaker(square));
+
+        square.set_c('\u{3000}');
+        assert!(is_run_breaker(square));
+
+        square.set_c('x');
+        assert!(!is_run_breaker(square));
     }
 }

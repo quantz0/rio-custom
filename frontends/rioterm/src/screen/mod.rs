@@ -9,7 +9,7 @@
 pub mod hint;
 pub mod touch;
 
-use crate::bindings::kitty_keyboard::build_key_sequence;
+use crate::bindings::kitty_keyboard::build_key_sequence as build_kitty_key_sequence;
 use crate::bindings::{
     Action as Act, BindingKey, BindingMode, FontSizeAction, MouseBinding, SearchAction,
     ViAction,
@@ -80,6 +80,16 @@ const MAX_SEARCH_HISTORY_SIZE: usize = 255;
 enum CopyOrInterruptDisposition {
     CopySelection,
     SendInterrupt,
+}
+
+#[cfg(windows)]
+fn build_win32_key_sequence(key: &rio_window::event::KeyEvent) -> Vec<u8> {
+    crate::bindings::win32_input::build_key_sequence(key)
+}
+
+#[cfg(not(windows))]
+fn build_win32_key_sequence(_: &rio_window::event::KeyEvent) -> Vec<u8> {
+    Vec::new()
 }
 
 #[inline]
@@ -778,6 +788,22 @@ impl Screen<'_> {
         let mods = self.modifiers.state();
 
         if key.state == ElementState::Released {
+            if mode.contains(Mode::WIN32_INPUT_MODE) {
+                if mode.contains(Mode::VI)
+                    || self.search_active()
+                    || self.hint_state.is_active()
+                {
+                    return;
+                }
+
+                let bytes = build_win32_key_sequence(key);
+                if !bytes.is_empty() {
+                    self.ctx_mut().current_mut().messenger.send_write(bytes);
+                }
+
+                return;
+            }
+
             if !mode.contains(Mode::REPORT_EVENT_TYPES)
                 || mode.contains(Mode::VI)
                 || self.search_active()
@@ -806,7 +832,7 @@ impl Screen<'_> {
                 {
                     return
                 }
-                _ => build_key_sequence(key, mods, mode),
+                _ => build_kitty_key_sequence(key, mods, mode),
             };
 
             self.ctx_mut().current_mut().messenger.send_write(bytes);
@@ -891,8 +917,10 @@ impl Screen<'_> {
 
         let build_key_sequence = Self::should_build_sequence(key, text, mode, mods);
 
-        let bytes = if build_key_sequence {
-            crate::bindings::kitty_keyboard::build_key_sequence(key, mods, mode)
+        let bytes = if mode.contains(Mode::WIN32_INPUT_MODE) {
+            build_win32_key_sequence(key)
+        } else if build_key_sequence {
+            build_kitty_key_sequence(key, mods, mode)
         } else {
             let mut bytes = Vec::with_capacity(text.len() + 1);
             if mods.alt_key() {

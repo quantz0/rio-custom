@@ -477,6 +477,13 @@ impl KeyEventBuilder {
         } else {
             WindowsModifiers::empty()
         };
+        let mut control_key_state = 0;
+        if caps_lock_on {
+            control_key_state |= 0x0080;
+        }
+        if num_lock_on {
+            control_key_state |= 0x0020;
+        }
         let layout = layouts.layouts.get(&(locale_id as u64)).unwrap();
         let logical_key = layout.get_key(mods, num_lock_on, vk, &physical_key);
         let key_without_modifiers =
@@ -488,6 +495,9 @@ impl KeyEventBuilder {
         };
         let event_info = PartialKeyEventInfo {
             vkey: vk,
+            virtual_scan_code: scancode & 0xff,
+            control_key_state,
+            repeat_count: 1,
             logical_key: PartialLogicalKey::This(logical_key.clone()),
             key_without_modifiers,
             key_state,
@@ -527,6 +537,9 @@ enum PartialLogicalKey {
 
 struct PartialKeyEventInfo {
     vkey: VIRTUAL_KEY,
+    virtual_scan_code: u16,
+    control_key_state: u32,
+    repeat_count: u16,
     key_state: ElementState,
     is_repeat: bool,
     physical_key: PhysicalKey,
@@ -568,6 +581,8 @@ impl PartialKeyEventInfo {
         let location = get_location(scancode, layout.hkl as HKL);
 
         let kbd_state = get_kbd_state();
+        let control_key_state =
+            win32_control_key_state(&kbd_state, lparam_struct.extended);
         let mods = WindowsModifiers::active_modifiers(&kbd_state);
         let mods_without_ctrl = mods.remove_only_ctrl();
         let num_lock_on = kbd_state[VK_NUMLOCK as usize] & 1 != 0;
@@ -629,6 +644,9 @@ impl PartialKeyEventInfo {
 
         PartialKeyEventInfo {
             vkey,
+            virtual_scan_code: scancode & 0xff,
+            control_key_state,
+            repeat_count: lparam_struct.repeat_count,
             key_state: state,
             logical_key,
             key_without_modifiers,
@@ -689,6 +707,10 @@ impl PartialKeyEventInfo {
             platform_specific: KeyEventExtra {
                 text_with_all_modifiers: char_with_all_modifiers,
                 key_without_modifiers: self.key_without_modifiers,
+                win32_virtual_key_code: self.vkey,
+                win32_virtual_scan_code: self.virtual_scan_code,
+                win32_control_key_state: self.control_key_state,
+                win32_repeat_count: self.repeat_count,
             },
         }
     }
@@ -696,6 +718,7 @@ impl PartialKeyEventInfo {
 
 #[derive(Debug, Copy, Clone)]
 struct KeyLParam {
+    pub repeat_count: u16,
     pub scancode: u8,
     pub extended: bool,
 
@@ -708,6 +731,7 @@ fn destructure_key_lparam(lparam: LPARAM) -> KeyLParam {
     let previous_state = (lparam >> 30) & 0x01;
     let transition_state = (lparam >> 31) & 0x01;
     KeyLParam {
+        repeat_count: (lparam & 0xffff) as u16,
         scancode: ((lparam >> 16) & 0xff) as u8,
         extended: ((lparam >> 24) & 0x01) != 0,
         is_repeat: (previous_state ^ transition_state) != 0,
@@ -723,6 +747,50 @@ fn new_ex_scancode(scancode: u8, extended: bool) -> ExScancode {
 fn ex_scancode_from_lparam(lparam: LPARAM) -> ExScancode {
     let lparam = destructure_key_lparam(lparam);
     new_ex_scancode(lparam.scancode, lparam.extended)
+}
+
+fn win32_control_key_state(key_state: &[u8; 256], enhanced: bool) -> u32 {
+    const RIGHT_ALT_PRESSED: u32 = 0x0001;
+    const LEFT_ALT_PRESSED: u32 = 0x0002;
+    const RIGHT_CTRL_PRESSED: u32 = 0x0004;
+    const LEFT_CTRL_PRESSED: u32 = 0x0008;
+    const SHIFT_PRESSED: u32 = 0x0010;
+    const NUMLOCK_ON: u32 = 0x0020;
+    const SCROLLLOCK_ON: u32 = 0x0040;
+    const CAPSLOCK_ON: u32 = 0x0080;
+    const ENHANCED_KEY: u32 = 0x0100;
+
+    let mut state = 0;
+
+    if key_state[VK_RMENU as usize] & 0x80 != 0 {
+        state |= RIGHT_ALT_PRESSED;
+    }
+    if key_state[VK_LMENU as usize] & 0x80 != 0 {
+        state |= LEFT_ALT_PRESSED;
+    }
+    if key_state[VK_RCONTROL as usize] & 0x80 != 0 {
+        state |= RIGHT_CTRL_PRESSED;
+    }
+    if key_state[VK_LCONTROL as usize] & 0x80 != 0 {
+        state |= LEFT_CTRL_PRESSED;
+    }
+    if key_state[VK_SHIFT as usize] & 0x80 != 0 {
+        state |= SHIFT_PRESSED;
+    }
+    if key_state[VK_NUMLOCK as usize] & 0x01 != 0 {
+        state |= NUMLOCK_ON;
+    }
+    if key_state[VK_SCROLL as usize] & 0x01 != 0 {
+        state |= SCROLLLOCK_ON;
+    }
+    if key_state[VK_CAPITAL as usize] & 0x01 != 0 {
+        state |= CAPSLOCK_ON;
+    }
+    if enhanced {
+        state |= ENHANCED_KEY;
+    }
+
+    state
 }
 
 /// Gets the keyboard state as reported by messages that have been removed from the event queue.

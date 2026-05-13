@@ -100,6 +100,7 @@ bitflags! {
         const REPORT_ALTERNATE_KEYS   = 1 << 20;
         const REPORT_ALL_KEYS_AS_ESC  = 1 << 21;
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
+        const WIN32_INPUT_MODE        = 1 << 23;
         const MOUSE_MODE = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
@@ -2018,6 +2019,17 @@ impl<U: EventListener> Handler for Crosswords<U> {
                     .send_event(RioEvent::CursorBlinkingChange, self.window_id);
             }
             NamedPrivateMode::SyncUpdate => (),
+            NamedPrivateMode::Win32InputMode => {
+                #[cfg(windows)]
+                {
+                    self.mode.insert(Mode::WIN32_INPUT_MODE);
+                }
+
+                #[cfg(not(windows))]
+                {
+                    debug!("Ignoring win32-input-mode on non-Windows target");
+                }
+            }
         }
     }
 
@@ -2090,6 +2102,17 @@ impl<U: EventListener> Handler for Crosswords<U> {
                     .send_event(RioEvent::CursorBlinkingChange, self.window_id);
             }
             NamedPrivateMode::SyncUpdate => (),
+            NamedPrivateMode::Win32InputMode => {
+                #[cfg(windows)]
+                {
+                    self.mode.remove(Mode::WIN32_INPUT_MODE);
+                }
+
+                #[cfg(not(windows))]
+                {
+                    debug!("Ignoring win32-input-mode reset on non-Windows target");
+                }
+            }
         }
     }
 
@@ -2137,6 +2160,17 @@ impl<U: EventListener> Handler for Crosswords<U> {
                 }
                 NamedPrivateMode::SyncUpdate => ModeState::Reset,
                 NamedPrivateMode::ColumnMode => ModeState::NotSupported,
+                NamedPrivateMode::Win32InputMode => {
+                    #[cfg(windows)]
+                    {
+                        self.mode.contains(Mode::WIN32_INPUT_MODE).into()
+                    }
+
+                    #[cfg(not(windows))]
+                    {
+                        ModeState::NotSupported
+                    }
+                }
             },
             PrivateMode::Unknown(_) => ModeState::NotSupported,
         };
@@ -5658,6 +5692,48 @@ mod tests {
             assert_eq!(term.keyboard_mode_stack[i], 0);
             assert_eq!(term.inactive_keyboard_mode_stack[i], 0);
         }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn win32_input_mode_is_not_enabled_on_non_windows_target() {
+        let size = CrosswordsSize::new(1, 1);
+        let window_id = WindowId::from(0);
+        let mut term = Crosswords::new(
+            size,
+            CursorShape::Block,
+            VoidListener {},
+            window_id,
+            0,
+            10_000,
+        );
+
+        Handler::set_private_mode(&mut term, NamedPrivateMode::Win32InputMode.into());
+        assert!(!term.mode().contains(Mode::WIN32_INPUT_MODE));
+
+        Handler::unset_private_mode(&mut term, NamedPrivateMode::Win32InputMode.into());
+        assert!(!term.mode().contains(Mode::WIN32_INPUT_MODE));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn win32_input_mode_is_enabled_on_windows_target() {
+        let size = CrosswordsSize::new(1, 1);
+        let window_id = WindowId::from(0);
+        let mut term = Crosswords::new(
+            size,
+            CursorShape::Block,
+            VoidListener {},
+            window_id,
+            0,
+            10_000,
+        );
+
+        Handler::set_private_mode(&mut term, NamedPrivateMode::Win32InputMode.into());
+        assert!(term.mode().contains(Mode::WIN32_INPUT_MODE));
+
+        Handler::unset_private_mode(&mut term, NamedPrivateMode::Win32InputMode.into());
+        assert!(!term.mode().contains(Mode::WIN32_INPUT_MODE));
     }
 
     #[test]
