@@ -99,7 +99,39 @@ find_wix_bin() {
 require_command cargo
 require_command powershell.exe
 require_command wslpath
-require_command file
+require_command od
+
+is_windows_x64_exe() {
+    local path=$1
+    local mz
+    local pe_offset
+    local pe_header_and_machine
+
+    [ -f "$path" ] || return 1
+
+    mz=$(od -An -tx1 -N2 "$path" | tr -d ' \n') || return 1
+    [ "$mz" = "4d5a" ] || return 1
+
+    pe_offset=$(od -An -tu4 -j60 -N4 "$path" | tr -d ' \n') || return 1
+    case "$pe_offset" in
+        '' | *[!0-9]*)
+            return 1
+            ;;
+    esac
+
+    pe_header_and_machine=$(od -An -tx1 -j "$pe_offset" -N6 "$path" | tr -d ' \n') || return 1
+    [ "$pe_header_and_machine" = "504500006486" ]
+}
+
+is_msi_installer() {
+    local path=$1
+    local header
+
+    [ -f "$path" ] || return 1
+
+    header=$(od -An -tx1 -N8 "$path" | tr -d ' \n') || return 1
+    [ "$header" = "d0cf11e0a1b11ae1" ]
+}
 
 WIX_BIN=$(find_wix_bin)
 VERSION=$(cargo pkgid -p "$PACKAGE_ID" | sed 's/.*#//')
@@ -225,9 +257,9 @@ if [ ! -f "$TARGET_EXE" ]; then
     exit 1
 fi
 
-if ! file "$TARGET_EXE" | grep -q 'PE32+.*MS Windows'; then
+if ! is_windows_x64_exe "$TARGET_EXE"; then
     printf 'build output is not a Windows x86_64 executable: %s\n' "$TARGET_EXE" >&2
-    file "$TARGET_EXE" >&2
+    od -An -tx1 -N64 "$TARGET_EXE" >&2 || true
     exit 1
 fi
 
@@ -310,9 +342,9 @@ STAGE_LICENSE_WIN=$(wslpath -w "$STAGE_DIR/License.rtf")
     -out "$STAGE_MSI_WIN" \
     "$WIXOBJ_WIN"
 
-if ! file "$STAGE_DIR/$MSI_NAME" | grep -q 'MSI Installer'; then
+if ! is_msi_installer "$STAGE_DIR/$MSI_NAME"; then
     printf 'WiX output is not an MSI installer: %s\n' "$STAGE_DIR/$MSI_NAME" >&2
-    file "$STAGE_DIR/$MSI_NAME" >&2
+    od -An -tx1 -N64 "$STAGE_DIR/$MSI_NAME" >&2 || true
     exit 1
 fi
 

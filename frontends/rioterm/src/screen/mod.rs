@@ -93,6 +93,36 @@ fn build_win32_key_sequence(_: &rio_window::event::KeyEvent) -> Vec<u8> {
 }
 
 #[inline]
+fn is_interrupt_text(text: &str) -> bool {
+    text.as_bytes() == b"\x03"
+}
+
+#[inline]
+fn interrupt_targets_selection(text: &str, selection_is_empty: bool) -> bool {
+    is_interrupt_text(text) && !selection_is_empty
+}
+
+#[inline]
+fn is_modifier_key(logical_key: &Key) -> bool {
+    matches!(
+        logical_key,
+        Key::Named(
+            NamedKey::Shift
+                | NamedKey::Control
+                | NamedKey::Alt
+                | NamedKey::Super
+                | NamedKey::Hyper
+                | NamedKey::Meta
+        )
+    )
+}
+
+#[inline]
+fn modifier_key_targets_selection(logical_key: &Key, selection_is_empty: bool) -> bool {
+    is_modifier_key(logical_key) && !selection_is_empty
+}
+
+#[inline]
 fn copy_or_interrupt_disposition(selection_is_empty: bool) -> CopyOrInterruptDisposition {
     if selection_is_empty {
         CopyOrInterruptDisposition::SendInterrupt
@@ -788,6 +818,16 @@ impl Screen<'_> {
         let mods = self.modifiers.state();
 
         if key.state == ElementState::Released {
+            let text = key.text_with_all_modifiers().unwrap_or_default();
+            let selection_is_empty = self.selection_is_empty();
+
+            if interrupt_targets_selection(text, selection_is_empty) {
+                return;
+            }
+            if modifier_key_targets_selection(&key.logical_key, selection_is_empty) {
+                return;
+            }
+
             if mode.contains(Mode::WIN32_INPUT_MODE) {
                 if mode.contains(Mode::VI)
                     || self.search_active()
@@ -813,7 +853,6 @@ impl Screen<'_> {
             }
 
             // Mask `Alt` modifier from input when we won't send esc.
-            let text = key.text_with_all_modifiers().unwrap_or_default();
             let mods = if self.alt_send_esc(key, text) {
                 mods
             } else {
@@ -905,6 +944,16 @@ impl Screen<'_> {
 
         // Vi mode on its own doesn't have any input, the search input was done before.
         if mode.contains(Mode::VI) {
+            return;
+        }
+
+        let selection_is_empty = self.selection_is_empty();
+
+        if interrupt_targets_selection(text, selection_is_empty) {
+            self.copy_selection(ClipboardType::Clipboard, clipboard);
+            return;
+        }
+        if modifier_key_targets_selection(&key.logical_key, selection_is_empty) {
             return;
         }
 
@@ -4990,6 +5039,54 @@ mod tests {
             copy_or_interrupt_disposition(true),
             CopyOrInterruptDisposition::SendInterrupt
         );
+    }
+
+    #[test]
+    fn interrupt_text_matches_etx() {
+        assert!(is_interrupt_text("\x03"));
+    }
+
+    #[test]
+    fn interrupt_text_rejects_non_etx_input() {
+        assert!(!is_interrupt_text(""));
+        assert!(!is_interrupt_text("c"));
+        assert!(!is_interrupt_text("\x03c"));
+    }
+
+    #[test]
+    fn interrupt_targets_selection_only_for_etx_with_selection() {
+        assert!(interrupt_targets_selection("\x03", false));
+        assert!(!interrupt_targets_selection("\x03", true));
+        assert!(!interrupt_targets_selection("c", false));
+    }
+
+    #[test]
+    fn modifier_key_detection_matches_only_modifier_keys() {
+        assert!(is_modifier_key(&Key::Named(NamedKey::Control)));
+        assert!(is_modifier_key(&Key::Named(NamedKey::Shift)));
+        assert!(is_modifier_key(&Key::Named(NamedKey::Alt)));
+        assert!(is_modifier_key(&Key::Named(NamedKey::Super)));
+        assert!(is_modifier_key(&Key::Named(NamedKey::Hyper)));
+        assert!(is_modifier_key(&Key::Named(NamedKey::Meta)));
+
+        assert!(!is_modifier_key(&Key::Named(NamedKey::Enter)));
+        assert!(!is_modifier_key(&Key::Character("c".into())));
+    }
+
+    #[test]
+    fn modifier_key_targets_selection_only_for_modifier_with_selection() {
+        assert!(modifier_key_targets_selection(
+            &Key::Named(NamedKey::Control),
+            false
+        ));
+        assert!(!modifier_key_targets_selection(
+            &Key::Named(NamedKey::Control),
+            true
+        ));
+        assert!(!modifier_key_targets_selection(
+            &Key::Character("c".into()),
+            false
+        ));
     }
 
     #[test]
