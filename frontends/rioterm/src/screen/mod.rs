@@ -1873,7 +1873,7 @@ impl Screen<'_> {
             return;
         }
 
-        let num_tabs = self.ctx().len().wrapping_sub(1);
+        let num_tabs = self.ctx().len();
         self.resize_top_or_bottom_line(num_tabs);
         self.mark_dirty();
     }

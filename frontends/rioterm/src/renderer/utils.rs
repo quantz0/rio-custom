@@ -78,3 +78,47 @@ pub fn update_colors_based_on_theme(config: &mut Config, theme_opt: Option<Theme
         }
     }
 }
+
+#[cfg(all(test, not(target_os = "macos")))]
+mod tests {
+    use super::*;
+    use rio_backend::config::navigation::{Navigation, NavigationMode};
+
+    fn tab_navigation(hide_if_single: bool) -> Navigation {
+        Navigation {
+            mode: NavigationMode::Tab,
+            hide_if_single,
+            ..Navigation::default()
+        }
+    }
+
+    #[test]
+    fn padding_top_hides_tab_island_for_one_tab_when_configured() {
+        let margin_top = 5.0;
+
+        assert_eq!(
+            padding_top_from_config(&tab_navigation(true), margin_top, 1, false),
+            crate::constants::PADDING_Y + margin_top
+        );
+    }
+
+    #[test]
+    fn padding_top_keeps_tab_island_for_two_tabs_when_single_tab_hidden() {
+        let margin_top = 5.0;
+
+        assert_eq!(
+            padding_top_from_config(&tab_navigation(true), margin_top, 2, false),
+            crate::renderer::island::ISLAND_HEIGHT + margin_top
+        );
+    }
+
+    #[test]
+    fn padding_top_keeps_tab_island_for_one_tab_when_not_hiding_single_tab() {
+        let margin_top = 5.0;
+
+        assert_eq!(
+            padding_top_from_config(&tab_navigation(false), margin_top, 1, false),
+            crate::renderer::island::ISLAND_HEIGHT + margin_top
+        );
+    }
+}
