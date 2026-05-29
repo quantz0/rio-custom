@@ -148,6 +148,11 @@ pub fn default_ime_cursor_positioning() -> bool {
     true
 }
 
+#[inline]
+pub fn default_win32_input_mode() -> bool {
+    false
+}
+
 pub fn default_config_file_content() -> String {
     String::from(
         "# See the full configuration reference: https://rioterm.com/docs/config\n",

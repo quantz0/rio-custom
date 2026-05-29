@@ -64,6 +64,12 @@ impl Route<'_> {
         self.window.winit_window.request_redraw();
     }
 
+    #[inline]
+    pub fn force_request_redraw(&mut self) {
+        self.window.redraw_requested = true;
+        self.window.winit_window.request_redraw();
+    }
+
     /// Mark the active context dirty (UI-only) and request a redraw
     /// at the next vsync. Used by overlay input paths (command palette,
     /// assistant, island rename) where the UI changed but terminal

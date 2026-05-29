@@ -254,6 +254,7 @@ impl<T: EventListener + Clone + std::marker::Send + 'static> ContextManager<T> {
             route_id,
             config.scrollback_history_limit,
         );
+        terminal.set_win32_input_mode_allowed(config.keyboard.win32_input_mode);
         terminal.blinking_cursor = cursor_state.1;
         let terminal: Arc<FairMutex<Crosswords<T>>> = Arc::new(FairMutex::new(terminal));
 

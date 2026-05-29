@@ -369,6 +369,18 @@ This section documents the *[editor]* table of the configuration file.
 
 	Arguments to pass to the editor.
 
+# KEYBOARD
+
+This section documents the *[keyboard]* table of the configuration file.
+
+*win32-input-mode* = _true_ | _false_
+
+	Honor ConPTY Win32 input mode (DEC private mode 9001) on Windows.
+	When enabled, Rio sends keyboard input as Win32 input records for
+	applications that explicitly request that mode.
+
+	Default: _false_
+
 # BINDINGS
 
 This section documents the *[bindings]* table of the configuration file.

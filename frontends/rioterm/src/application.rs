@@ -31,6 +31,12 @@ use rio_window::window::{CursorIcon, Fullscreen};
 use std::error::Error;
 use std::time::{Duration, Instant};
 
+const RESIZE_RECONCILE_DELAYS: [Duration; 3] = [
+    Duration::from_millis(50),
+    Duration::from_millis(150),
+    Duration::from_millis(350),
+];
+
 pub struct Application<'a> {
     config: rio_backend::config::Config,
     event_proxy: EventProxy,
@@ -67,6 +73,57 @@ fn rendered_window_size_to_physical(
         rendered_size.width.round() as u32,
         rendered_size.height.round() as u32,
     )
+}
+
+#[inline]
+fn actual_route_window_size(route: &crate::router::Route<'_>) -> PhysicalSize<u32> {
+    if route.window.winit_window.fullscreen().is_some() {
+        if let Some(monitor) = route.window.winit_window.current_monitor() {
+            let monitor_size = monitor.size();
+            if monitor_size.width > 0 && monitor_size.height > 0 {
+                return monitor_size;
+            }
+        }
+    }
+
+    route.window.winit_window.inner_size()
+}
+
+#[inline]
+fn reconcile_route_window_size(
+    route: &mut crate::router::Route<'_>,
+    event_size: Option<PhysicalSize<u32>>,
+) -> bool {
+    let rendered_size =
+        rendered_window_size_to_physical(route.window.screen.sugarloaf.window_size());
+    let actual_size = actual_route_window_size(route);
+
+    if let Some(target_size) =
+        resolve_resize_target_size(rendered_size, event_size, actual_size)
+    {
+        route.window.screen.resize(target_size);
+        true
+    } else {
+        false
+    }
+}
+
+#[inline]
+fn schedule_resize_reconcile(
+    scheduler: &mut Scheduler,
+    window_id: WindowId,
+    route_id: usize,
+) {
+    let timer_id = TimerId::new(Topic::ResizeReconcile, route_id);
+    if scheduler.scheduled(timer_id) {
+        return;
+    }
+
+    let event =
+        EventPayload::new(RioEventType::Rio(RioEvent::ResizeReconcile), window_id);
+    for delay in RESIZE_RECONCILE_DELAYS {
+        scheduler.schedule(event.clone(), delay, false, timer_id);
+    }
 }
 
 #[inline]
@@ -268,6 +325,13 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                     }
 
                     route.request_redraw();
+                }
+            }
+            RioEventType::Rio(RioEvent::ResizeReconcile) => {
+                if let Some(route) = self.router.routes.get_mut(&window_id) {
+                    reconcile_route_window_size(route, None);
+                    route.window.screen.mark_dirty();
+                    route.force_request_redraw();
                 }
             }
             RioEventType::Rio(RioEvent::RenderRoute(route_id)) => {
@@ -845,6 +909,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
             RioEventType::Rio(RioEvent::ToggleFullScreen) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
+                    let route_id = route.window.screen.ctx().current_route();
                     match route.window.winit_window.fullscreen() {
                         None => route
                             .window
@@ -852,7 +917,11 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             .set_fullscreen(Some(Fullscreen::Borderless(None))),
                         _ => route.window.winit_window.set_fullscreen(None),
                     }
-                    route.request_redraw();
+                    if reconcile_route_window_size(route, None) {
+                        route.window.screen.mark_dirty();
+                    }
+                    route.force_request_redraw();
+                    schedule_resize_reconcile(&mut self.scheduler, window_id, route_id);
                 }
             }
             RioEventType::Rio(RioEvent::ToggleAppearanceTheme) => {
@@ -1620,6 +1689,17 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 event: key_event,
                 ..
             } => {
+                let should_schedule_resize_reconcile = cfg!(target_os = "windows")
+                    && key_event.state == ElementState::Pressed
+                    && route.window.screen.modifiers.state().alt_key()
+                    && matches!(
+                        &key_event.logical_key,
+                        rio_window::keyboard::Key::Named(
+                            rio_window::keyboard::NamedKey::Enter
+                        )
+                    );
+                let route_id = route.window.screen.ctx().current_route();
+
                 if route.has_key_wait(&key_event, &mut self.router.clipboard) {
                     if route.path != RoutePath::Terminal
                         && key_event.state == ElementState::Released
@@ -1629,6 +1709,13 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             Topic::Render,
                             route.window.screen.ctx().current_route(),
                         ));
+                    }
+                    if should_schedule_resize_reconcile {
+                        schedule_resize_reconcile(
+                            &mut self.scheduler,
+                            window_id,
+                            route_id,
+                        );
                     }
                     return;
                 }
@@ -1646,6 +1733,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 // also flow through here but their render is idempotent
                 // with the PTY-damage-driven redraw.
                 route.request_redraw();
+                if should_schedule_resize_reconcile {
+                    schedule_resize_reconcile(&mut self.scheduler, window_id, route_id);
+                }
 
                 if key_event.state == ElementState::Released
                     && self.config.hide_cursor_when_typing
@@ -1761,16 +1851,12 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
 
             WindowEvent::Resized(new_size) => {
-                let rendered_size = rendered_window_size_to_physical(
-                    route.window.screen.sugarloaf.window_size(),
-                );
-                let actual_size = route.window.winit_window.inner_size();
-                if let Some(target_size) =
-                    resolve_resize_target_size(rendered_size, Some(new_size), actual_size)
-                {
-                    route.window.screen.resize(target_size);
-                }
+                let resized = reconcile_route_window_size(route, Some(new_size));
+                let route_id = route.window.screen.ctx().current_route();
                 route.request_redraw();
+                if resized {
+                    schedule_resize_reconcile(&mut self.scheduler, window_id, route_id);
+                }
             }
 
             WindowEvent::ScaleFactorChanged {
@@ -1787,16 +1873,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
 
             WindowEvent::RedrawRequested => {
-                let rendered_size = rendered_window_size_to_physical(
-                    route.window.screen.sugarloaf.window_size(),
-                );
-                if let Some(target_size) = resolve_resize_target_size(
-                    rendered_size,
-                    None,
-                    route.window.winit_window.inner_size(),
-                ) {
-                    route.window.screen.resize(target_size);
-                }
+                reconcile_route_window_size(route, None);
 
                 // let start = std::time::Instant::now();
                 route.window.winit_window.pre_present_notify();
@@ -1900,6 +1977,12 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        for route in self.router.routes.values_mut() {
+            if reconcile_route_window_size(route, None) {
+                route.request_redraw();
+            }
+        }
+
         let control_flow = match self.scheduler.update() {
             Some(instant) => ControlFlow::WaitUntil(instant),
             None => ControlFlow::Wait,

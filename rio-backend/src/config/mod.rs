@@ -744,6 +744,26 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_win32_input_mode_defaults_disabled() {
+        let result = create_temporary_config("keyboard-defaults", "");
+
+        assert!(!result.keyboard.win32_input_mode);
+    }
+
+    #[test]
+    fn keyboard_win32_input_mode_can_be_enabled() {
+        let result = create_temporary_config(
+            "keyboard-win32-input-mode",
+            r#"
+[keyboard]
+win32-input-mode = true
+        "#,
+        );
+
+        assert!(result.keyboard.win32_input_mode);
+    }
+
+    #[test]
     fn test_if_explicit_defaults_match() {
         let result = create_temporary_config("defaults", &default_config_file_content());
 

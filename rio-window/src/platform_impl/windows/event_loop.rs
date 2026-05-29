@@ -36,7 +36,7 @@ use windows_sys::Win32::UI::Input::Ime::{
     GCS_COMPSTR, GCS_RESULTSTR, ISC_SHOWUICOMPOSITIONWINDOW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_RETURN,
 };
 use windows_sys::Win32::UI::Input::Pointer::{
     POINTER_FLAG_DOWN, POINTER_FLAG_UP, POINTER_FLAG_UPDATE,
@@ -55,11 +55,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, TranslateMessage, CREATESTRUCTW, GIDC_ARRIVAL, GIDC_REMOVAL, GWL_STYLE,
     GWL_USERDATA, HTCAPTION, HTCLIENT, IDYES, MB_ICONQUESTION, MB_TASKMODAL, MB_YESNO,
     MINMAXINFO, MNC_CLOSE, MSG, MWMO_INPUTAVAILABLE, NCCALCSIZE_PARAMS, PM_REMOVE,
-    PT_PEN, PT_TOUCH, QS_ALLINPUT, RI_MOUSE_HWHEEL, RI_MOUSE_WHEEL, SC_MINIMIZE,
-    SC_RESTORE, SIZE_MAXIMIZED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    WHEEL_DELTA, WINDOWPOS, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT, WMSZ_LEFT,
-    WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_CAPTURECHANGED, WM_CLOSE,
-    WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
+    PT_PEN, PT_TOUCH, QS_ALLINPUT, RI_MOUSE_HWHEEL, RI_MOUSE_WHEEL, SC_KEYMENU,
+    SC_MINIMIZE, SC_RESTORE, SIZE_MAXIMIZED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, WHEEL_DELTA, WINDOWPOS, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT,
+    WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT, WM_CAPTURECHANGED,
+    WM_CLOSE, WM_CREATE, WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE,
     WM_GETMINMAXINFO, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_SETCONTEXT,
     WM_IME_STARTCOMPOSITION, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_KEYDOWN, WM_KEYUP,
     WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
@@ -1739,6 +1739,10 @@ unsafe fn public_window_callback_inner(
 
         // this is necessary for us to maintain minimize/restore state
         WM_SYSCOMMAND => {
+            if wparam == SC_KEYMENU as usize && lparam as u16 == VK_RETURN {
+                result = ProcResult::Value(0);
+                return;
+            }
             if wparam == SC_RESTORE as usize {
                 let mut w = userdata.window_state_lock();
                 w.set_window_flags_in_place(|f| f.set(WindowFlags::MINIMIZED, false));
@@ -1901,7 +1905,11 @@ unsafe fn public_window_callback_inner(
 
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             if msg == WM_SYSKEYDOWN {
-                result = ProcResult::DefWindowProc(wparam);
+                result = if wparam as u16 == VK_RETURN {
+                    ProcResult::Value(0)
+                } else {
+                    ProcResult::DefWindowProc(wparam)
+                };
             }
         }
 

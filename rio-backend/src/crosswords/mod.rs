@@ -458,6 +458,7 @@ where
     keyboard_mode_idx: usize,
     inactive_keyboard_mode_stack: [u8; KEYBOARD_MODE_STACK_MAX_DEPTH],
     inactive_keyboard_mode_idx: usize,
+    win32_input_mode_allowed: bool,
 }
 
 impl<U: EventListener> Crosswords<U> {
@@ -511,6 +512,14 @@ impl<U: EventListener> Crosswords<U> {
             keyboard_mode_idx: 0,
             inactive_keyboard_mode_stack: Default::default(),
             inactive_keyboard_mode_idx: 0,
+            win32_input_mode_allowed: false,
+        }
+    }
+
+    pub fn set_win32_input_mode_allowed(&mut self, allowed: bool) {
+        self.win32_input_mode_allowed = allowed;
+        if !allowed {
+            self.mode.remove(Mode::WIN32_INPUT_MODE);
         }
     }
 
@@ -2022,7 +2031,11 @@ impl<U: EventListener> Handler for Crosswords<U> {
             NamedPrivateMode::Win32InputMode => {
                 #[cfg(windows)]
                 {
-                    self.mode.insert(Mode::WIN32_INPUT_MODE);
+                    if self.win32_input_mode_allowed {
+                        self.mode.insert(Mode::WIN32_INPUT_MODE);
+                    } else {
+                        debug!("Ignoring disabled win32-input-mode");
+                    }
                 }
 
                 #[cfg(not(windows))]
@@ -2163,7 +2176,11 @@ impl<U: EventListener> Handler for Crosswords<U> {
                 NamedPrivateMode::Win32InputMode => {
                     #[cfg(windows)]
                     {
-                        self.mode.contains(Mode::WIN32_INPUT_MODE).into()
+                        if self.win32_input_mode_allowed {
+                            self.mode.contains(Mode::WIN32_INPUT_MODE).into()
+                        } else {
+                            ModeState::NotSupported
+                        }
                     }
 
                     #[cfg(not(windows))]
@@ -5708,6 +5725,7 @@ mod tests {
             10_000,
         );
 
+        term.set_win32_input_mode_allowed(true);
         Handler::set_private_mode(&mut term, NamedPrivateMode::Win32InputMode.into());
         assert!(!term.mode().contains(Mode::WIN32_INPUT_MODE));
 
@@ -5717,7 +5735,7 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn win32_input_mode_is_enabled_on_windows_target() {
+    fn win32_input_mode_requires_explicit_enable_on_windows_target() {
         let size = CrosswordsSize::new(1, 1);
         let window_id = WindowId::from(0);
         let mut term = Crosswords::new(
@@ -5729,6 +5747,17 @@ mod tests {
             10_000,
         );
 
+        Handler::set_private_mode(&mut term, NamedPrivateMode::Win32InputMode.into());
+        assert!(!term.mode().contains(Mode::WIN32_INPUT_MODE));
+
+        term.set_win32_input_mode_allowed(true);
+        Handler::set_private_mode(&mut term, NamedPrivateMode::Win32InputMode.into());
+        assert!(term.mode().contains(Mode::WIN32_INPUT_MODE));
+
+        term.set_win32_input_mode_allowed(false);
+        assert!(!term.mode().contains(Mode::WIN32_INPUT_MODE));
+
+        term.set_win32_input_mode_allowed(true);
         Handler::set_private_mode(&mut term, NamedPrivateMode::Win32InputMode.into());
         assert!(term.mode().contains(Mode::WIN32_INPUT_MODE));
 

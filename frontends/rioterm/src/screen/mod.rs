@@ -285,9 +285,16 @@ impl Screen<'_> {
                 Backend::Webgpu => SugarloafBackend::Wgpu(
                     wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
                 ),
-                #[cfg(any(
-                    all(feature = "wgpu", not(target_arch = "wasm32")),
-                    target_os = "windows"
+                // On Windows, wgpu::Backends::all() may pick Vulkan first.
+                // Vulkan keeps the old Win32 client-area origin after
+                // decorated -> borderless fullscreen transitions on some
+                // drivers, leaving the new frame offset on screen.
+                #[cfg(target_os = "windows")]
+                Backend::Webgpu => SugarloafBackend::Wgpu(wgpu::Backends::DX12),
+                #[cfg(all(
+                    feature = "wgpu",
+                    not(target_arch = "wasm32"),
+                    not(target_os = "windows")
                 ))]
                 Backend::Webgpu => SugarloafBackend::Wgpu(wgpu::Backends::all()),
                 #[cfg(all(not(target_os = "windows"), not(feature = "wgpu")))]
@@ -629,6 +636,7 @@ impl Screen<'_> {
                 terminal.cursor_shape = shape;
                 terminal.default_cursor_shape = shape;
                 terminal.blinking_cursor = config.cursor.blinking;
+                terminal.set_win32_input_mode_allowed(config.keyboard.win32_input_mode);
                 drop(terminal);
             }
         }

@@ -212,10 +212,16 @@ impl Default for SugarloafRenderer {
         #[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
         let default_backend = SugarloafBackend::Vulkan;
 
+        // Prefer DX12 on Windows. The wgpu Vulkan surface can retain the
+        // pre-fullscreen client-area origin after Win32 style changes.
+        #[cfg(all(target_os = "windows", not(target_arch = "wasm32"), feature = "wgpu"))]
+        let default_backend = SugarloafBackend::Wgpu(wgpu::Backends::DX12);
+
         #[cfg(all(
             not(target_arch = "wasm32"),
             not(target_os = "macos"),
             not(target_os = "linux"),
+            not(target_os = "windows"),
             feature = "wgpu",
         ))]
         let default_backend = SugarloafBackend::Wgpu(wgpu::Backends::all());

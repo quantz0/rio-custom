@@ -69,6 +69,8 @@ pub enum RioEvent {
     Render,
     /// New terminal content available per route.
     RenderRoute(usize),
+    /// Follow-up redraw after a window resize/fullscreen transition.
+    ResizeReconcile,
     /// Terminal content changed — lightweight notification (no damage payload).
     /// Damage stays in the terminal; renderer extracts it when it locks.
     TerminalDamaged(usize),
@@ -235,6 +237,7 @@ impl Debug for RioEvent {
             }
             RioEvent::Render => write!(f, "Render"),
             RioEvent::RenderRoute(route) => write!(f, "Render route {route}"),
+            RioEvent::ResizeReconcile => write!(f, "ResizeReconcile"),
             RioEvent::TerminalDamaged(route_id) => {
                 write!(f, "TerminalDamaged route {route_id}")
             }
