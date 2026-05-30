@@ -14,6 +14,7 @@
 //! GPU backend is Metal on macOS and wgpu on other platforms.
 
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 use crate::font::FontLibrary;
 
@@ -215,7 +216,7 @@ pub struct Text {
 
     /// Position-independent shape cache. Hash of
     /// `(font_id, size_bucket, style_flags, text)` → shaped run.
-    shape_cache: FxHashMap<u64, ShapedRun>,
+    shape_cache: FxHashMap<u64, Arc<ShapedRun>>,
 
     #[cfg(target_os = "macos")]
     handle_cache: FxHashMap<u32, crate::font::macos::FontHandle>,
@@ -330,7 +331,7 @@ impl Text {
 
     //  Shape pipeline — shared cache + cfg-gated backend call
 
-    fn shape_for(&mut self, text: &str, opts: &DrawOpts) -> Option<ShapedRun> {
+    fn shape_for(&mut self, text: &str, opts: &DrawOpts) -> Option<Arc<ShapedRun>> {
         use crate::{Attributes, SpanStyle, Stretch, Style as FontStyle, Weight};
 
         let scaled = opts.font_size * self.scale_factor;
@@ -339,42 +340,47 @@ impl Text {
         let style_flags =
             (if opts.bold { 1u8 } else { 0 }) | (if opts.italic { 2u8 } else { 0 });
 
-        let first_ch = text.chars().next()?;
-        let (font_id, _is_emoji) = match self.font_resolve.entry((first_ch, style_flags))
-        {
-            std::collections::hash_map::Entry::Occupied(e) => *e.get(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                let mut ss = SpanStyle::default();
-                let weight = if opts.bold {
-                    Weight::BOLD
-                } else {
-                    Weight::NORMAL
-                };
-                let fstyle = if opts.italic {
-                    FontStyle::Italic
-                } else {
-                    FontStyle::Normal
-                };
-                ss.font_attrs = Attributes::new(Stretch::NORMAL, weight, fstyle);
-                #[cfg(target_os = "macos")]
-                let resolved = self.font_library.resolve_font_for_char(first_ch, &ss);
+        let font_id = if let Some(font_id) = opts.font_id {
+            font_id as u32
+        } else {
+            let first_ch = text.chars().next()?;
+            let (font_id, _is_emoji) =
+                match self.font_resolve.entry((first_ch, style_flags)) {
+                    std::collections::hash_map::Entry::Occupied(e) => *e.get(),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        let mut ss = SpanStyle::default();
+                        let weight = if opts.bold {
+                            Weight::BOLD
+                        } else {
+                            Weight::NORMAL
+                        };
+                        let fstyle = if opts.italic {
+                            FontStyle::Italic
+                        } else {
+                            FontStyle::Normal
+                        };
+                        ss.font_attrs = Attributes::new(Stretch::NORMAL, weight, fstyle);
+                        #[cfg(target_os = "macos")]
+                        let resolved =
+                            self.font_library.resolve_font_for_char(first_ch, &ss);
 
-                #[cfg(not(target_os = "macos"))]
-                let resolved = {
-                    let lib = self.font_library.inner.read();
-                    lib.find_best_font_match(first_ch, &ss)
-                        .unwrap_or((0, false))
+                        #[cfg(not(target_os = "macos"))]
+                        let resolved = {
+                            let lib = self.font_library.inner.read();
+                            lib.find_best_font_match(first_ch, &ss)
+                                .unwrap_or((0, false))
+                        };
+                        let v = (resolved.0 as u32, resolved.1);
+                        e.insert(v);
+                        v
+                    }
                 };
-                let v = (resolved.0 as u32, resolved.1);
-                e.insert(v);
-                v
-            }
+            font_id
         };
-        let font_id = opts.font_id.map(|id| id as u32).unwrap_or(font_id);
 
         let hash = shape_hash(font_id, size_bucket, style_flags, text);
         if let Some(entry) = self.shape_cache.get(&hash) {
-            return Some(entry.clone());
+            return Some(Arc::clone(entry));
         }
 
         let (synthetic_bold, synthetic_italic) = match self.synthesis_cache.entry(font_id)
@@ -470,7 +476,7 @@ impl Text {
             (glyphs, ascent_px)
         };
 
-        let run = ShapedRun {
+        let run = Arc::new(ShapedRun {
             font_id,
             size_u16,
             size_bucket,
@@ -478,8 +484,8 @@ impl Text {
             synthetic_italic,
             ascent_px,
             glyphs,
-        };
-        self.shape_cache.insert(hash, run.clone());
+        });
+        self.shape_cache.insert(hash, Arc::clone(&run));
         Some(run)
     }
 

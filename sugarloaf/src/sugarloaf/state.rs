@@ -177,17 +177,9 @@ impl SugarState {
 
     #[inline]
     pub fn reset(&mut self) {
-        // Remove states marked for removal
-        let mut to_remove = Vec::new();
-        for (id, content_state) in &self.content.states {
-            if content_state.render_data.should_remove {
-                to_remove.push(*id);
-            }
-        }
-
-        for id in to_remove {
-            self.content.remove_state(&id);
-        }
+        self.content
+            .states
+            .retain(|_, content_state| !content_state.render_data.should_remove);
 
         // Clear all transient texts (they get recreated each frame)
         self.content.clear_transient_texts();

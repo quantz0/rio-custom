@@ -109,12 +109,8 @@ fn reconcile_route_window_size(
 }
 
 #[inline]
-fn schedule_resize_reconcile(
-    scheduler: &mut Scheduler,
-    window_id: WindowId,
-    route_id: usize,
-) {
-    let timer_id = TimerId::new(Topic::ResizeReconcile, route_id);
+fn schedule_resize_reconcile(scheduler: &mut Scheduler, window_id: WindowId) {
+    let timer_id = TimerId::new_u64(Topic::ResizeReconcile, window_id.into());
     if scheduler.scheduled(timer_id) {
         return;
     }
@@ -909,7 +905,6 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             }
             RioEventType::Rio(RioEvent::ToggleFullScreen) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
-                    let route_id = route.window.screen.ctx().current_route();
                     match route.window.winit_window.fullscreen() {
                         None => route
                             .window
@@ -921,7 +916,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         route.window.screen.mark_dirty();
                     }
                     route.force_request_redraw();
-                    schedule_resize_reconcile(&mut self.scheduler, window_id, route_id);
+                    schedule_resize_reconcile(&mut self.scheduler, window_id);
                 }
             }
             RioEventType::Rio(RioEvent::ToggleAppearanceTheme) => {
@@ -1698,7 +1693,6 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             rio_window::keyboard::NamedKey::Enter
                         )
                     );
-                let route_id = route.window.screen.ctx().current_route();
 
                 if route.has_key_wait(&key_event, &mut self.router.clipboard) {
                     if route.path != RoutePath::Terminal
@@ -1711,11 +1705,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                         ));
                     }
                     if should_schedule_resize_reconcile {
-                        schedule_resize_reconcile(
-                            &mut self.scheduler,
-                            window_id,
-                            route_id,
-                        );
+                        schedule_resize_reconcile(&mut self.scheduler, window_id);
                     }
                     return;
                 }
@@ -1734,7 +1724,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                 // with the PTY-damage-driven redraw.
                 route.request_redraw();
                 if should_schedule_resize_reconcile {
-                    schedule_resize_reconcile(&mut self.scheduler, window_id, route_id);
+                    schedule_resize_reconcile(&mut self.scheduler, window_id);
                 }
 
                 if key_event.state == ElementState::Released
@@ -1852,10 +1842,9 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
 
             WindowEvent::Resized(new_size) => {
                 let resized = reconcile_route_window_size(route, Some(new_size));
-                let route_id = route.window.screen.ctx().current_route();
                 route.request_redraw();
                 if resized {
-                    schedule_resize_reconcile(&mut self.scheduler, window_id, route_id);
+                    schedule_resize_reconcile(&mut self.scheduler, window_id);
                 }
             }
 

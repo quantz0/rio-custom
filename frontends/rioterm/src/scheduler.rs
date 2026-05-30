@@ -11,12 +11,23 @@ use rio_window::event_loop::EventLoopProxy;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct TimerId {
     topic: Topic,
-    id: usize,
+    id: u64,
 }
 
 impl TimerId {
     pub fn new(topic: Topic, id: usize) -> Self {
+        Self {
+            topic,
+            id: id as u64,
+        }
+    }
+
+    pub fn new_u64(topic: Topic, id: u64) -> Self {
         Self { topic, id }
+    }
+
+    fn should_remove_for_route(self, route_id: u64) -> bool {
+        self.id == route_id && self.topic.is_route_scoped()
     }
 }
 
@@ -30,6 +41,18 @@ pub enum Topic {
     CursorBlinking,
     UpdateTitles,
     SelectionScrolling,
+}
+
+impl Topic {
+    fn is_route_scoped(self) -> bool {
+        matches!(
+            self,
+            Topic::Render
+                | Topic::RenderRoute
+                | Topic::CursorBlinking
+                | Topic::SelectionScrolling
+        )
+    }
 }
 
 /// Event scheduled to be emitted at a specific time.
@@ -114,7 +137,7 @@ impl Scheduler {
     }
 
     /// Check if a timer is already scheduled.
-    pub fn scheduled(&mut self, id: TimerId) -> bool {
+    pub fn scheduled(&self, id: TimerId) -> bool {
         self.timers.iter().any(|timer| timer.id == id)
     }
 
@@ -123,6 +146,32 @@ impl Scheduler {
     /// This must be called when a tab is removed to ensure that timers on intervals do not
     /// stick around forever and cause a memory leak.
     pub fn unschedule_window(&mut self, id: usize) {
-        self.timers.retain(|timer| timer.id.id != id);
+        let id = id as u64;
+        self.timers
+            .retain(|timer| !timer.id.should_remove_for_route(id));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TimerId, Topic};
+
+    #[test]
+    fn route_cleanup_only_removes_route_scoped_timers() {
+        let route_id = 0;
+
+        assert!(TimerId::new(Topic::Render, route_id).should_remove_for_route(0));
+        assert!(TimerId::new(Topic::RenderRoute, route_id).should_remove_for_route(0));
+        assert!(TimerId::new(Topic::CursorBlinking, route_id).should_remove_for_route(0));
+        assert!(
+            TimerId::new(Topic::SelectionScrolling, route_id).should_remove_for_route(0)
+        );
+
+        assert!(!TimerId::new(Topic::UpdateTitles, route_id).should_remove_for_route(0));
+        assert!(!TimerId::new(Topic::UpdateConfig, route_id).should_remove_for_route(0));
+        assert!(
+            !TimerId::new(Topic::ResizeReconcile, route_id).should_remove_for_route(0)
+        );
+        assert!(!TimerId::new(Topic::Render, route_id + 1).should_remove_for_route(0));
     }
 }
