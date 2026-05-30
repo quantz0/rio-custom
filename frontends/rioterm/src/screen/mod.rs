@@ -2944,6 +2944,11 @@ impl Screen<'_> {
         let window_width = self.sugarloaf.window_size().width;
         let num_tabs = self.context_manager.len();
 
+        // Island is hidden when hide_if_single is set with a single tab.
+        if self.renderer.navigation.hide_if_single && num_tabs <= 1 {
+            return false;
+        }
+
         // Check if the color picker is open and the click hits a swatch
         if let Some(ref mut island) = self.renderer.island {
             if island.is_color_picker_open() {
@@ -4061,13 +4066,22 @@ impl Screen<'_> {
                         let s = self.sugarloaf.style();
                         s.font_size * s.scale_factor
                     });
-                let (visible_rows, style_set, term_colors, display_offset) = {
+                let (
+                    visible_rows,
+                    style_set,
+                    term_colors,
+                    display_offset,
+                    snapshot_cols,
+                    snapshot_rows,
+                ) = {
                     let terminal = ctx.terminal.lock();
                     (
                         terminal.visible_rows(),
                         terminal.grid.style_set.clone(),
                         terminal.colors,
                         terminal.display_offset() as i32,
+                        terminal.columns(),
+                        terminal.screen_lines(),
                     )
                 };
                 let selection = ctx.renderable_content.selection_range;
@@ -4117,8 +4131,12 @@ impl Screen<'_> {
                 panels.push(PanelFrame {
                     route_id: ctx.route_id,
                     terminal_rect: item.terminal_rect,
-                    cols: dim.columns.max(1) as u32,
-                    rows: dim.lines.max(1) as u32,
+                    // `dim` can move ahead of the terminal during resize.
+                    // Use the snapshot dimensions captured under the same
+                    // lock as `visible_rows` so row widths stay consistent
+                    // with the painted data.
+                    cols: snapshot_cols.max(1) as u32,
+                    rows: snapshot_rows.max(1) as u32,
                     cell_w,
                     cell_h,
                     font_px,
@@ -4259,6 +4277,14 @@ impl Screen<'_> {
                         &hint_scratch,
                         &mut bg_scratch,
                     );
+                    let cursor_col_for_row = if p.cursor_visible
+                        && (y as u16) == p.cursor_row
+                        && p.cursor_shape != rio_backend::ansi::CursorShape::Hidden
+                    {
+                        Some(p.cursor_col)
+                    } else {
+                        None
+                    };
                     crate::grid_emit::build_row_fg(
                         row,
                         cols,
@@ -4274,6 +4300,7 @@ impl Screen<'_> {
                         row_sel,
                         &hint_scratch,
                         &font_library,
+                        cursor_col_for_row,
                         &mut fg_scratch,
                     );
                     grid.write_row(y as u32, &bg_scratch, &fg_scratch);

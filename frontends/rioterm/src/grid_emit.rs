@@ -1334,6 +1334,10 @@ pub fn build_row_fg(
     row_sel: Option<RowSelection>,
     row_hints: &[RowHint],
     font_library: &FontLibrary,
+    // Column of the cursor on this row, or `None` if the cursor is on a
+    // different row or hidden. Splitting a run around the cursor prevents
+    // ligature lookahead from making pre-cursor cells vanish while typing.
+    cursor_col_for_row: Option<u16>,
     fg_scratch: &mut Vec<CellText>,
 ) {
     fg_scratch.clear();
@@ -1429,6 +1433,17 @@ pub fn build_row_fg(
             let sq2 = row[Column(end)];
             if is_run_breaker(sq2) {
                 break;
+            }
+            if !sq2.has_grapheme() {
+                if let Some(cursor_x) = cursor_col_for_row {
+                    let cursor_x = cursor_x as usize;
+                    if run_start == cursor_x && end == run_start + 1 {
+                        break;
+                    }
+                    if run_start < cursor_x && end == cursor_x {
+                        break;
+                    }
+                }
             }
             let style2_id = sq2.style_id();
             if style2_id != prev_style_id {

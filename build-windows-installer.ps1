@@ -1,11 +1,10 @@
 #requires -Version 5.1
 [CmdletBinding()]
 param(
-    [ValidateSet('dev', 'release')]
-    [string] $Profile = 'release',
+    [ValidateSet('release-fast', 'release')]
+    [string] $Profile = 'release-fast',
 
-    [switch] $Dev,
-    [switch] $Release,
+    [switch] $FullRelease,
     [switch] $SkipBuild,
     [switch] $Compact,
 
@@ -19,15 +18,7 @@ $ErrorActionPreference = 'Stop'
 $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $RootDir
 
-if ($Dev -and $Release) {
-    throw 'Use either -Dev or -Release, not both.'
-}
-
-if ($Dev) {
-    $Profile = 'dev'
-}
-
-if ($Release) {
+if ($FullRelease) {
     $Profile = 'release'
 }
 
@@ -43,13 +34,8 @@ $PathComponentGuid = 'edf0b679-9eb6-46f7-a5d1-5160f30acb34'
 $ShortcutComponentGuid = 'aa36e61a-23cd-4383-b744-2f78e912f0dc'
 $ContextMenuComponentGuid = '449f9121-f7b9-41fe-82da-52349ea8ff91'
 
-if ($Profile -eq 'release') {
-    $TargetProfileDir = 'release'
-    $MsiNameSuffix = 'x86_64'
-} else {
-    $TargetProfileDir = 'debug'
-    $MsiNameSuffix = 'x86_64-fast'
-}
+$TargetProfileDir = $Profile
+$MsiNameSuffix = 'x86_64'
 
 function Require-Command {
     param([Parameter(Mandatory = $true)][string] $Name)
@@ -242,9 +228,10 @@ try {
         Write-Host 'Rustc:'
         rustc -vV
 
-        $cargoArgs = @('build', '-p', $PackageId)
         if ($Profile -eq 'release') {
-            $cargoArgs += '--release'
+            $cargoArgs = @('build', '-p', $PackageId, '--release')
+        } else {
+            $cargoArgs = @('build', '-p', $PackageId, '--profile', $Profile)
         }
 
         & cargo @cargoArgs
@@ -369,9 +356,7 @@ try {
     New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
 
     $PackageMsi = Join-Path $PackageDir $MsiName
-    $PackageExe = Join-Path $PackageDir 'rio.exe'
     Copy-Item -LiteralPath $StageMsi -Destination $PackageMsi -Force
-    Copy-Item -LiteralPath $StageExe -Destination $PackageExe -Force
 
     if ($Compact) {
         $targetRoot = [System.IO.Path]::GetFullPath((Join-Path $RootDir 'target'))
@@ -384,7 +369,6 @@ try {
     }
 
     Write-Host "Windows installer: $PackageMsi"
-    Write-Host "Portable executable: $PackageExe"
     Write-Host "Cargo cache: $CargoTargetDir"
 } finally {
     if (Test-Path -LiteralPath $StageDir) {
