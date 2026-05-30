@@ -6,11 +6,10 @@ use crate::config::colors::ColorRgb;
 use crate::crosswords::grid::Scroll;
 use crate::crosswords::pos::{Direction, Pos};
 use crate::crosswords::search::{Match, RegexSearch};
-use crate::crosswords::LineDamage;
 use crate::error::RioError;
 use rio_window::event::Event as RioWindowEvent;
 use std::borrow::Cow;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::sync::Arc;
@@ -46,16 +45,20 @@ pub enum ClickState {
     TripleClick,
 }
 
-/// Terminal damage information for efficient rendering
-#[derive(Debug, Clone, PartialEq, Default)]
+/// Terminal damage hint for efficient rendering.
+///
+/// The exact per-row decision is tracked by `Row::dirty`; this enum is a
+/// coarse gate for whether the renderer can skip row work, rebuild dirty rows,
+/// or force a full rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TerminalDamage {
     /// Nothing changed — skip rendering entirely
     #[default]
     Noop,
     /// The entire terminal needs to be redrawn
     Full,
-    /// Only specific lines need to be redrawn
-    Partial(BTreeSet<LineDamage>),
+    /// At least one row changed; consult per-row dirty bits
+    Partial,
     /// Only the cursor position has changed
     CursorOnly,
 }

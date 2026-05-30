@@ -245,6 +245,10 @@ impl<T: GridSquare + Default + PartialEq + Clone> Grid<T> {
                 self.raw[line].reset(&self.cursor.template);
             }
         }
+
+        for i in (region.start.0..region.end.0).map(Line::from) {
+            self.raw[i].dirty = true;
+        }
     }
 
     pub fn cursor_square(&mut self) -> &mut T {
@@ -306,6 +310,10 @@ impl<T: GridSquare + Default + PartialEq + Clone> Grid<T> {
         // Ensure all new lines are fully cleared.
         for i in (region.end.0 - positions as i32..region.end.0).map(Line::from) {
             self.raw[i].reset(&self.cursor.template);
+        }
+
+        for i in (region.start.0..region.end.0).map(Line::from) {
+            self.raw[i].dirty = true;
         }
     }
 

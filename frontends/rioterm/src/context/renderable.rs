@@ -28,7 +28,7 @@ pub struct Cursor {
     pub is_ime_enabled: bool,
 }
 
-/// Hint label information for rendering
+/// Hint label information for rendering.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct HintLabel {
@@ -39,7 +39,6 @@ pub struct HintLabel {
 
 #[derive(Default)]
 pub struct RenderableContent {
-    // TODO: Should not use default
     pub cursor: Cursor,
     pub has_blinking_enabled: bool,
     pub is_blinking_cursor_visible: bool,
@@ -52,15 +51,28 @@ pub struct RenderableContent {
     pub last_blink_toggle: Option<Instant>,
     pub pending_update: PendingUpdate,
     pub background: Option<BackgroundState>,
-    /// Damage extracted by `Renderer::run` for this frame. Consumed
-    /// by the macOS grid emission path in `Screen::render` to gate
-    /// per-row rebuilds.
-    ///
-    /// `Full` on construction so the first frame's emission rebuilds
-    /// everything — the grid's CPU+GPU buffers start zeroed and
-    /// need a full fill. Reset to `Noop` after the grid consumes it
-    /// so next frame only re-emits if damage actually arrived.
-    pub last_frame_damage: TerminalDamage,
+    /// Damage hint for the in-progress frame. Set by `Renderer::run`
+    /// from PTY + UI damage merging, consumed by `Screen::render`'s
+    /// grid emit to choose whether to rebuild no rows, dirty rows, or
+    /// all rows.
+    pub frame_damage: TerminalDamage,
+
+    /// Per-context viewport row buffer reused across frames.
+    pub visible_rows: Vec<Row<Square>>,
+    /// Parallel per-cell resolved styles, flat row-major.
+    pub cell_styles: Vec<rio_backend::crosswords::style::Style>,
+    /// Snapshot of visible cell extras keyed by `extras_id`.
+    pub extras: FxHashMap<u16, rio_backend::crosswords::square::Extras>,
+    pub term_colors: TermColors,
+    pub display_offset: usize,
+    pub columns: usize,
+    pub screen_lines: usize,
+    pub history_size: usize,
+    pub blinking_cursor: bool,
+    pub kitty_virtual_placements: FxHashMap<(u32, u32), VirtualPlacement>,
+    pub kitty_images: FxHashMap<u32, StoredImage>,
+    pub kitty_placements: Vec<KittyPlacement>,
+    pub kitty_graphics_dirty: bool,
 }
 
 impl RenderableContent {
@@ -78,7 +90,20 @@ impl RenderableContent {
             pending_update: PendingUpdate::default(),
             is_blinking_cursor_visible: false,
             background: None,
-            last_frame_damage: TerminalDamage::Full,
+            frame_damage: TerminalDamage::Full,
+            visible_rows: Vec::new(),
+            cell_styles: Vec::new(),
+            extras: FxHashMap::default(),
+            term_colors: TermColors::default(),
+            display_offset: 0,
+            columns: 0,
+            screen_lines: 0,
+            history_size: 0,
+            blinking_cursor: false,
+            kitty_virtual_placements: FxHashMap::default(),
+            kitty_images: FxHashMap::default(),
+            kitty_placements: Vec::new(),
+            kitty_graphics_dirty: false,
         }
     }
 
@@ -93,69 +118,30 @@ impl RenderableContent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct TerminalSnapshot {
-    pub colors: TermColors,
-    pub display_offset: usize,
-    pub blinking_cursor: bool,
-    pub visible_rows: Vec<Row<Square>>,
-    /// Snapshot of the grid's per-cell style intern table. Cloned cheaply
-    /// (the table is just a `Vec<Style>` plus an `FxHashMap`); the renderer
-    /// dereferences cell `style_id`s through this clone instead of reaching
-    /// into the live grid.
-    pub style_set: rio_backend::crosswords::style::StyleSet,
-    /// Snapshot of the grid's extras table (zero-width chars, hyperlinks,
-    /// sixel/iterm graphics). The renderer reads per-cell graphic data
-    /// through this clone.
-    pub extras_table: rio_backend::crosswords::grid::ExtrasTable,
-    pub cursor: CursorState,
-    pub damage: TerminalDamage,
-    // Cache terminal dimensions to avoid repeated calls
-    pub columns: usize,
-    pub screen_lines: usize,
-    pub history_size: usize,
-    // Kitty graphics virtual placements
-    pub kitty_virtual_placements: FxHashMap<(u32, u32), VirtualPlacement>,
-    // Kitty graphics stored images
-    pub kitty_images: FxHashMap<u32, StoredImage>,
-    // Kitty graphics overlay placements (sorted by z_index for layered rendering)
-    pub kitty_placements: Vec<KittyPlacement>,
-    // Whether kitty graphics state changed since last frame
-    pub kitty_graphics_dirty: bool,
-}
-
 #[derive(Debug, Default)]
 pub struct PendingUpdate {
-    /// Whether there's any pending update that needs rendering
+    /// Whether there's any pending update that needs rendering.
     dirty: bool,
-    /// Terminal content damage (lines, text)
+    /// Terminal content damage.
     terminal_damage: Option<TerminalDamage>,
 }
 
 impl PendingUpdate {
-    /// Check if there's a pending update
     #[inline]
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
 
-    /// Check whether terminal content repaint is pending.
     #[inline]
     pub fn has_terminal_damage(&self) -> bool {
         self.terminal_damage.is_some()
     }
 
-    /// Mark as needing to check for damage on next render. Use this
-    /// when UI overlays (command palette, assistant, search bar,
-    /// island) change but terminal cells haven't — the `dirty` flag
-    /// alone is enough to pass `Renderer::run`'s per-context gate,
-    /// and `(None, None) => TerminalDamage::Noop` in the inner damage
-    /// match keeps the panel in the render set with zero row work.
+    /// Mark as needing to check for damage on next render.
     pub fn set_dirty(&mut self) {
         self.dirty = true;
     }
 
-    /// Mark terminal content as damaged
     pub fn set_terminal_damage(&mut self, damage: TerminalDamage) {
         self.dirty = true;
         self.terminal_damage = Some(match self.terminal_damage.take() {
@@ -164,40 +150,26 @@ impl PendingUpdate {
         });
     }
 
-    /// Get and clear terminal damage
     pub fn take_terminal_damage(&mut self) -> Option<TerminalDamage> {
         self.terminal_damage.take()
     }
 
-    /// Reset the dirty flag after rendering
     pub fn reset(&mut self) {
         self.dirty = false;
-        // Note: terminal damage is cleared by take_terminal_damage during render
     }
 
-    /// Merge two terminal damages into one
+    /// Merge two terminal damage hints into one. Strict ordering by
+    /// amount of work needed: Full > Partial > CursorOnly > Noop.
     pub fn merge_terminal_damages(
         existing: TerminalDamage,
         new: TerminalDamage,
     ) -> TerminalDamage {
+        use TerminalDamage::*;
         match (existing, new) {
-            // Any damage + Full = Full
-            (_, TerminalDamage::Full) | (TerminalDamage::Full, _) => TerminalDamage::Full,
-            // Partial damages: merge the line lists
-            (TerminalDamage::Partial(mut lines1), TerminalDamage::Partial(lines2)) => {
-                lines1.extend(lines2);
-                TerminalDamage::Partial(lines1)
-            }
-            // CursorOnly damages need special handling
-            (TerminalDamage::CursorOnly, TerminalDamage::Partial(lines))
-            | (TerminalDamage::Partial(lines), TerminalDamage::CursorOnly) => {
-                TerminalDamage::Partial(lines)
-            }
-            (TerminalDamage::CursorOnly, TerminalDamage::CursorOnly) => {
-                TerminalDamage::CursorOnly
-            }
-            // Noop + anything = the other thing
-            (TerminalDamage::Noop, other) | (other, TerminalDamage::Noop) => other,
+            (Full, _) | (_, Full) => Full,
+            (Partial, _) | (_, Partial) => Partial,
+            (CursorOnly, _) | (_, CursorOnly) => CursorOnly,
+            (Noop, Noop) => Noop,
         }
     }
 }

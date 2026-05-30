@@ -570,17 +570,19 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
             RioEventType::Rio(RioEvent::CursorBlinkingChangeOnRoute(route_id)) => {
                 if let Some(route) = self.router.routes.get_mut(&window_id) {
                     if route_id == route.window.screen.ctx().current_route() {
-                        // Get cursor position for damage
-                        let cursor_line = {
-                            let terminal = route
+                        {
+                            let mut terminal = route
                                 .window
                                 .screen
                                 .ctx_mut()
                                 .current_mut()
                                 .terminal
                                 .lock();
-                            terminal.cursor().pos.row.0 as usize
-                        };
+                            let cursor_line = terminal.cursor().pos.row;
+                            if cursor_line.0 >= 0 {
+                                terminal.grid[cursor_line].dirty = true;
+                            }
+                        }
 
                         // Set terminal damage for cursor line
                         route
@@ -591,14 +593,7 @@ impl ApplicationHandler<EventPayload> for Application<'_> {
                             .renderable_content
                             .pending_update
                             .set_terminal_damage(
-                                rio_backend::event::TerminalDamage::Partial(
-                                    [rio_backend::crosswords::LineDamage::new(
-                                        cursor_line,
-                                        true,
-                                    )]
-                                    .into_iter()
-                                    .collect(),
-                                ),
+                                rio_backend::event::TerminalDamage::Partial,
                             );
 
                         route.request_redraw();

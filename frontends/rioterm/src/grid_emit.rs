@@ -27,13 +27,15 @@ use rio_backend::config::colors::{AnsiColor, NamedColor};
 use rio_backend::crosswords::grid::row::Row;
 use rio_backend::crosswords::pos::{Column, Line, Pos};
 use rio_backend::crosswords::search::Match;
-use rio_backend::crosswords::square::{ContentTag, Square};
-use rio_backend::crosswords::style::{StyleFlags, StyleSet};
+use rio_backend::crosswords::square::{ContentTag, Extras, Square};
+use rio_backend::crosswords::style::{Style, StyleFlags};
 use rio_backend::selection::SelectionRange;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::renderer::Renderer;
+
+pub(crate) type ExtrasMap = FxHashMap<u16, Extras>;
 
 /// Per-row selection interval, in column indices. `None` = row is
 /// outside the selection. Block selections reduce to the same
@@ -261,14 +263,14 @@ use rio_backend::sugarloaf::grid::{
 
 pub fn cell_fg(
     sq: Square,
-    style_set: &StyleSet,
+    style: Style,
     renderer: &Renderer,
     term_colors: &TermColors,
 ) -> [u8; 4] {
     if sq.is_bg_only() {
         return normalized_to_u8(renderer.named_colors.foreground);
     }
-    let mut style = style_set.get(sq.style_id());
+    let mut style = style;
     if style.flags.contains(StyleFlags::INVERSE) {
         std::mem::swap(&mut style.fg, &mut style.bg);
     }
@@ -286,12 +288,12 @@ pub fn cell_fg(
 #[inline]
 pub fn cell_fg_selected(
     sq: Square,
-    style_set: &StyleSet,
+    style: Style,
     renderer: &Renderer,
     term_colors: &TermColors,
 ) -> [u8; 4] {
     if renderer.ignore_selection_fg_color {
-        cell_fg(sq, style_set, renderer, term_colors)
+        cell_fg(sq, style, renderer, term_colors)
     } else {
         normalized_to_u8(renderer.named_colors.selection_foreground)
     }
@@ -825,21 +827,20 @@ fn underline_style_from_flags(flags: StyleFlags) -> Option<DecorationStyle> {
 #[inline]
 fn decoration_color(
     sq: Square,
-    style: &rio_backend::crosswords::style::Style,
-    style_set: &StyleSet,
+    style: Style,
     renderer: &Renderer,
     term_colors: &TermColors,
 ) -> [u8; 4] {
     if let Some(uc) = style.underline_color {
         normalized_to_u8(renderer.compute_color(&uc, style.flags, term_colors))
     } else {
-        cell_fg(sq, style_set, renderer, term_colors)
+        cell_fg(sq, style, renderer, term_colors)
     }
 }
 
 pub fn cell_bg(
     sq: Square,
-    style_set: &StyleSet,
+    style: Style,
     renderer: &Renderer,
     term_colors: &TermColors,
 ) -> [u8; 4] {
@@ -853,7 +854,7 @@ pub fn cell_bg(
             renderer.color(idx, term_colors)
         }
         ContentTag::Codepoint => {
-            let mut style = style_set.get(sq.style_id());
+            let mut style = style;
             if style.flags.contains(StyleFlags::INVERSE) {
                 std::mem::swap(&mut style.fg, &mut style.bg);
             }
@@ -882,7 +883,7 @@ fn normalized_to_u8(c: [f32; 4]) -> [u8; 4] {
 pub fn build_row_bg(
     row: &Row<Square>,
     cols: usize,
-    style_set: &StyleSet,
+    row_styles: &[Style],
     renderer: &Renderer,
     term_colors: &TermColors,
     row_sel: Option<RowSelection>,
@@ -902,8 +903,9 @@ pub fn build_row_bg(
         bg_scratch.reserve(cols);
         for x in 0..cols {
             let sq = row[Column(x)];
+            let style = row_styles.get(x).copied().unwrap_or_default();
             bg_scratch.push(CellBg {
-                rgba: cell_bg(sq, style_set, renderer, term_colors),
+                rgba: cell_bg(sq, style, renderer, term_colors),
             });
         }
         return;
@@ -929,25 +931,27 @@ pub fn build_row_bg(
     };
     for x in 0..cols {
         let sq = row[Column(x)];
+        let style = row_styles.get(x).copied().unwrap_or_default();
         let col = x as u16;
         let rgba = if cell_in_row_sel(row_sel, col) {
             // Selection bg wins over hint bg and the cell's own bg,
             // matching `generic.zig:2775-2800` (selection check
             // runs before highlight check).
-            sel_bg.unwrap_or_else(|| cell_bg(sq, style_set, renderer, term_colors))
+            sel_bg.unwrap_or_else(|| cell_bg(sq, style, renderer, term_colors))
         } else if let Some(tag) = cell_in_row_hints(row_hints, col) {
             match tag {
                 HintTag::Focused => focused_bg
-                    .unwrap_or_else(|| cell_bg(sq, style_set, renderer, term_colors)),
-                HintTag::Match => match_bg
-                    .unwrap_or_else(|| cell_bg(sq, style_set, renderer, term_colors)),
+                    .unwrap_or_else(|| cell_bg(sq, style, renderer, term_colors)),
+                HintTag::Match => {
+                    match_bg.unwrap_or_else(|| cell_bg(sq, style, renderer, term_colors))
+                }
                 // `cell_in_row_hints` filters HyperlinkHover out, but
                 // make the match exhaustive so a future caller can't
                 // accidentally hit a panic.
-                HintTag::HyperlinkHover => cell_bg(sq, style_set, renderer, term_colors),
+                HintTag::HyperlinkHover => cell_bg(sq, style, renderer, term_colors),
             }
         } else {
-            cell_bg(sq, style_set, renderer, term_colors)
+            cell_bg(sq, style, renderer, term_colors)
         };
         bg_scratch.push(CellBg { rgba });
     }
@@ -1323,7 +1327,8 @@ pub fn build_row_fg(
     row: &Row<Square>,
     cols: usize,
     y: u16,
-    style_set: &StyleSet,
+    row_styles: &[Style],
+    _extras_table: &ExtrasMap,
     renderer: &Renderer,
     term_colors: &TermColors,
     rasterizer: &mut GridGlyphRasterizer,
@@ -1363,7 +1368,7 @@ pub fn build_row_fg(
         row,
         cols,
         y,
-        style_set,
+        row_styles,
         renderer,
         term_colors,
         grid,
@@ -1385,9 +1390,8 @@ pub fn build_row_fg(
 
         // Open a run at x.
         let ch = sq.c();
-        let run_start_style_id = sq.style_id();
-        let run_style_flags =
-            (style_set.get(run_start_style_id).flags.bits() & SHAPING_FLAG_MASK) as u8;
+        let run_start_style = row_styles.get(x).copied().unwrap_or_default();
+        let run_style_flags = (run_start_style.flags.bits() & SHAPING_FLAG_MASK) as u8;
         let (font_id, is_emoji) =
             rasterizer.resolve_font(ch, run_style_flags, font_library);
         let run_start = x;
@@ -1396,7 +1400,7 @@ pub fn build_row_fg(
         // we know shape flags match too, so skip the StyleSet vec read
         // + bits/mask/compare. Mirrors ghostty `font/shaper/run.zig:140`
         // (`if (prev_cell.style_id == cell.style_id) break :style;`).
-        let mut prev_style_id = run_start_style_id;
+        let _run_start_style = run_start_style;
 
         // Kitty Unicode placeholder shapes as a space — the cell
         // joins the run, the shaper emits an invisible space glyph
@@ -1445,13 +1449,10 @@ pub fn build_row_fg(
                     }
                 }
             }
-            let style2_id = sq2.style_id();
-            if style2_id != prev_style_id {
-                let f = (style_set.get(style2_id).flags.bits() & SHAPING_FLAG_MASK) as u8;
-                if f != run_style_flags {
-                    break;
-                }
-                prev_style_id = style2_id;
+            let style2 = row_styles.get(end).copied().unwrap_or_default();
+            let f = (style2.flags.bits() & SHAPING_FLAG_MASK) as u8;
+            if f != run_style_flags {
+                break;
             }
             let ch2 = sq2.c();
             let (font_id2, _) =
@@ -1609,6 +1610,7 @@ pub fn build_row_fg(
             let src_col =
                 (run_start + cell_idx_in_run as usize).min(cols.saturating_sub(1));
             let src_sq = row[Column(src_col)];
+            let src_style = row_styles.get(src_col).copied().unwrap_or_default();
             let (atlas, color) = if is_color {
                 // Colour glyphs (emoji) don't take the selection-fg /
                 // hint-fg swap — behaviour for
@@ -1619,7 +1621,7 @@ pub fn build_row_fg(
                 // this row.
                 (
                     CellText::ATLAS_GRAYSCALE,
-                    cell_fg(src_sq, style_set, renderer, term_colors),
+                    cell_fg(src_sq, src_style, renderer, term_colors),
                 )
             } else {
                 let is_sel = cell_in_row_sel(row_sel, src_col as u16);
@@ -1631,7 +1633,7 @@ pub fn build_row_fg(
                 if is_sel {
                     (
                         CellText::ATLAS_GRAYSCALE,
-                        cell_fg_selected(src_sq, style_set, renderer, term_colors),
+                        cell_fg_selected(src_sq, src_style, renderer, term_colors),
                     )
                 } else if let Some(tag) = hint_tag {
                     // Hint-fg wins over the cell's own fg, matching
@@ -1641,7 +1643,7 @@ pub fn build_row_fg(
                 } else {
                     (
                         CellText::ATLAS_GRAYSCALE,
-                        cell_fg(src_sq, style_set, renderer, term_colors),
+                        cell_fg(src_sq, src_style, renderer, term_colors),
                     )
                 }
             };
@@ -1667,7 +1669,7 @@ pub fn build_row_fg(
         row,
         cols,
         y,
-        style_set,
+        row_styles,
         renderer,
         term_colors,
         grid,
@@ -1685,7 +1687,7 @@ fn emit_underlines(
     row: &Row<Square>,
     cols: usize,
     y: u16,
-    style_set: &StyleSet,
+    row_styles: &[Style],
     renderer: &Renderer,
     term_colors: &TermColors,
     grid: &mut GridRenderer,
@@ -1698,7 +1700,7 @@ fn emit_underlines(
 ) {
     for x in 0..cols {
         let sq = row[Column(x)];
-        let style = style_set.get(sq.style_id());
+        let style = row_styles.get(x).copied().unwrap_or_default();
         let col = x as u16;
         // SGR underline (UNDER, double, curly, …) wins over the
         // hover-only forced underline. When the cell has no SGR
@@ -1724,7 +1726,7 @@ fn emit_underlines(
             // it stays visible against the selection bg. SGR 58 is
             // suppressed here — a theme's selection_foreground
             // overrides per-cell decoration color.
-            cell_fg_selected(sq, style_set, renderer, term_colors)
+            cell_fg_selected(sq, style, renderer, term_colors)
         } else if let Some(tag) = cell_in_row_hints(row_hints, col) {
             // Same reasoning as selection: underline inside a hint
             // should stay legible on the hint bg.
@@ -1733,9 +1735,9 @@ fn emit_underlines(
             // Hover-only forced underline: use the cell fg so the
             // underline tracks the hyperlink text color (matches
             // hyperlink hover affordance).
-            cell_fg(sq, style_set, renderer, term_colors)
+            cell_fg(sq, style, renderer, term_colors)
         } else {
-            decoration_color(sq, &style, style_set, renderer, term_colors)
+            decoration_color(sq, style, renderer, term_colors)
         };
         fg_scratch.push(CellText {
             glyph_pos: [slot.x as u32, slot.y as u32],
@@ -1755,7 +1757,7 @@ fn emit_strikethroughs(
     row: &Row<Square>,
     cols: usize,
     y: u16,
-    style_set: &StyleSet,
+    row_styles: &[Style],
     renderer: &Renderer,
     term_colors: &TermColors,
     grid: &mut GridRenderer,
@@ -1768,7 +1770,7 @@ fn emit_strikethroughs(
 ) {
     for x in 0..cols {
         let sq = row[Column(x)];
-        let style = style_set.get(sq.style_id());
+        let style = row_styles.get(x).copied().unwrap_or_default();
         if !style.flags.contains(StyleFlags::STRIKEOUT) {
             continue;
         }
@@ -1788,11 +1790,11 @@ fn emit_strikethroughs(
         // Strikethrough always uses the cell fg (there's no SGR for
         // a separate strike color, matching ).
         let color = if cell_in_row_sel(row_sel, col) {
-            cell_fg_selected(sq, style_set, renderer, term_colors)
+            cell_fg_selected(sq, style, renderer, term_colors)
         } else if let Some(tag) = cell_in_row_hints(row_hints, col) {
             cell_fg_hinted(tag, renderer)
         } else {
-            cell_fg(sq, style_set, renderer, term_colors)
+            cell_fg(sq, style, renderer, term_colors)
         };
         fg_scratch.push(CellText {
             glyph_pos: [slot.x as u32, slot.y as u32],
@@ -2000,7 +2002,7 @@ fn font_library_hinting(_r: &GridGlyphRasterizer) -> bool {
 mod tests {
     use super::*;
     use rio_backend::config::Config;
-    use rio_backend::crosswords::style::StyleSet;
+    use rio_backend::crosswords::style::Style;
     use rio_backend::sugarloaf::ImageProperties;
 
     fn renderer_with_background_image(enabled: bool) -> Renderer {
@@ -2017,11 +2019,11 @@ mod tests {
     #[test]
     fn default_background_cell_is_transparent_with_background_image() {
         let renderer = renderer_with_background_image(true);
-        let style_set = StyleSet::default();
+        let style = Style::default();
         let term_colors = TermColors::default();
 
         assert_eq!(
-            cell_bg(Square::default(), &style_set, &renderer, &term_colors),
+            cell_bg(Square::default(), style, &renderer, &term_colors),
             [0, 0, 0, 0]
         );
     }
@@ -2029,11 +2031,11 @@ mod tests {
     #[test]
     fn default_background_cell_stays_opaque_without_background_image() {
         let renderer = renderer_with_background_image(false);
-        let style_set = StyleSet::default();
+        let style = Style::default();
         let term_colors = TermColors::default();
 
         assert_eq!(
-            cell_bg(Square::default(), &style_set, &renderer, &term_colors),
+            cell_bg(Square::default(), style, &renderer, &term_colors),
             normalized_to_u8(renderer.named_colors.background.0)
         );
     }
@@ -2041,13 +2043,13 @@ mod tests {
     #[test]
     fn explicit_background_cell_stays_opaque_with_background_image() {
         let renderer = renderer_with_background_image(true);
-        let style_set = StyleSet::default();
+        let style = Style::default();
         let term_colors = TermColors::default();
         let mut square = Square::default();
         square.set_bg_rgb(1, 2, 3);
 
         assert_eq!(
-            cell_bg(square, &style_set, &renderer, &term_colors),
+            cell_bg(square, style, &renderer, &term_colors),
             [1, 2, 3, 255]
         );
     }
